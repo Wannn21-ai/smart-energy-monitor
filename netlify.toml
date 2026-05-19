@@ -1,0 +1,50 @@
+# ================================================================
+# netlify.toml — Konfigurasi deployment Smart Energy Monitor
+# ================================================================
+
+[build]
+  # Folder yang akan di-publish (root project web)
+  publish = "energy-monitor-web"
+
+  # Perintah build: ganti semua placeholder NETLIFY_ENV_*
+  # di setiap file HTML dengan nilai environment variable asli.
+  # Tidak perlu Node.js / npm — murni sed + bash.
+  command = """
+    for file in energy-monitor-web/*.html; do
+      sed -i \
+        -e "s|NETLIFY_ENV_FIREBASE_API_KEY|$FIREBASE_API_KEY|g" \
+        -e "s|NETLIFY_ENV_FIREBASE_AUTH_DOMAIN|$FIREBASE_AUTH_DOMAIN|g" \
+        -e "s|NETLIFY_ENV_FIREBASE_DATABASE_URL|$FIREBASE_DATABASE_URL|g" \
+        -e "s|NETLIFY_ENV_FIREBASE_PROJECT_ID|$FIREBASE_PROJECT_ID|g" \
+        -e "s|NETLIFY_ENV_FIREBASE_STORAGE_BUCKET|$FIREBASE_STORAGE_BUCKET|g" \
+        -e "s|NETLIFY_ENV_FIREBASE_MESSAGING_SENDER_ID|$FIREBASE_MESSAGING_SENDER_ID|g" \
+        -e "s|NETLIFY_ENV_FIREBASE_APP_ID|$FIREBASE_APP_ID|g" \
+        "$file"
+    done
+  """
+
+# ── SPA routing: semua path → index.html ────────────────────────
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
+
+# ── Security headers ────────────────────────────────────────────
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options        = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy        = "strict-origin-when-cross-origin"
+    # CSP: izinkan Firebase, Google Fonts, CDN Chart.js
+    Content-Security-Policy = """
+      default-src 'self';
+      script-src 'self' 'unsafe-inline' https://www.gstatic.com https://cdn.jsdelivr.net;
+      style-src  'self' 'unsafe-inline' https://fonts.googleapis.com;
+      font-src   'self' https://fonts.gstatic.com;
+      connect-src 'self'
+        https://*.firebaseio.com
+        https://*.googleapis.com
+        wss://*.firebaseio.com;
+      img-src 'self' data:;
+    """

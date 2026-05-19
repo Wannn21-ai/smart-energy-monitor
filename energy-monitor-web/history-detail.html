@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Session Detail — Smart Energy Monitor</title>
+
+  <meta name="firebase-api-key"            content="NETLIFY_ENV_FIREBASE_API_KEY"/>
+  <meta name="firebase-auth-domain"        content="NETLIFY_ENV_FIREBASE_AUTH_DOMAIN"/>
+  <meta name="firebase-database-url"       content="NETLIFY_ENV_FIREBASE_DATABASE_URL"/>
+  <meta name="firebase-project-id"         content="NETLIFY_ENV_FIREBASE_PROJECT_ID"/>
+  <meta name="firebase-storage-bucket"     content="NETLIFY_ENV_FIREBASE_STORAGE_BUCKET"/>
+  <meta name="firebase-messaging-sender-id" content="NETLIFY_ENV_FIREBASE_MESSAGING_SENDER_ID"/>
+  <meta name="firebase-app-id"             content="NETLIFY_ENV_FIREBASE_APP_ID"/>
+
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main-content" id="main-content">
+      <header class="topbar" id="topbar"></header>
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <div class="page-header-title" id="detail-device-name">Session Detail</div>
+            <div class="page-header-sub" id="detail-date">—</div>
+          </div>
+          <div style="display:flex;gap:10px;">
+            <a href="history.html" class="btn btn-ghost">← Back</a>
+            <button class="btn btn-primary" id="btn-export">↓ Export CSV</button>
+          </div>
+        </div>
+        <div class="detail-grid" id="detail-grid"></div>
+        <div id="detail-empty" style="display:none;">
+          <div class="empty-state">
+            <div class="empty-state-icon">⚠</div>
+            <div class="empty-state-title">Session not found</div>
+            <div class="empty-state-sub"><a href="history.html" style="color:var(--cyan);">Back to History</a></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="js/history-detail.js"></script>
+</body>
+</html>

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Login — Smart Energy Monitor</title>
+
+  <meta name="firebase-api-key"            content="NETLIFY_ENV_FIREBASE_API_KEY"/>
+  <meta name="firebase-auth-domain"        content="NETLIFY_ENV_FIREBASE_AUTH_DOMAIN"/>
+  <meta name="firebase-database-url"       content="NETLIFY_ENV_FIREBASE_DATABASE_URL"/>
+  <meta name="firebase-project-id"         content="NETLIFY_ENV_FIREBASE_PROJECT_ID"/>
+  <meta name="firebase-storage-bucket"     content="NETLIFY_ENV_FIREBASE_STORAGE_BUCKET"/>
+  <meta name="firebase-messaging-sender-id" content="NETLIFY_ENV_FIREBASE_MESSAGING_SENDER_ID"/>
+  <meta name="firebase-app-id"             content="NETLIFY_ENV_FIREBASE_APP_ID"/>
+
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card">
+      <div class="login-logo">
+        <div class="login-logo-icon">⚡</div>
+        <div>
+          <div class="login-logo-text">S·E·M</div>
+          <div style="font-size:10px;color:var(--text-muted);letter-spacing:0.05em;">Smart Energy Monitor</div>
+        </div>
+      </div>
+      <div id="login-title" class="login-title">Welcome back</div>
+      <div id="login-sub" class="login-sub">Sign in to your account</div>
+      <div id="login-error" class="login-error"></div>
+
+      <!-- LOGIN FORM -->
+      <div id="form-login">
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input type="email" id="login-email" class="form-input" placeholder="you@email.com" autocomplete="email"/>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input type="password" id="login-password" class="form-input" placeholder="••••••••" autocomplete="current-password"/>
+        </div>
+        <button id="btn-login" class="btn btn-primary" style="width:100%;justify-content:center;margin-top:8px;">
+          Sign In
+        </button>
+        <div class="login-switch">
+          Don't have an account? <a id="go-register">Register</a>
+        </div>
+      </div>
+
+      <!-- REGISTER FORM -->
+      <div id="form-register" style="display:none;">
+        <div class="form-group">
+          <label class="form-label">Full Name</label>
+          <input type="text" id="reg-name" class="form-input" placeholder="Your name"/>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input type="email" id="reg-email" class="form-input" placeholder="you@email.com" autocomplete="email"/>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input type="password" id="reg-password" class="form-input" placeholder="min. 6 characters" autocomplete="new-password"/>
+        </div>
+        <button id="btn-register" class="btn btn-primary" style="width:100%;justify-content:center;margin-top:8px;">
+          Create Account
+        </button>
+        <div class="login-switch">
+          Already have an account? <a id="go-login">Sign In</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { auth } from "./js/firebase-config.js";
+    import {
+      createUserWithEmailAndPassword,
+      signInWithEmailAndPassword,
+      updateProfile,
+      onAuthStateChanged
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+    onAuthStateChanged(auth, user => {
+      if (user) window.location.href = "index.html";
+    });
+
+    const loginError   = document.getElementById("login-error");
+    const formLogin    = document.getElementById("form-login");
+    const formRegister = document.getElementById("form-register");
+    const loginTitle   = document.getElementById("login-title");
+    const loginSub     = document.getElementById("login-sub");
+
+    function showError(msg) { loginError.textContent = msg; loginError.style.display = "block"; }
+    function hideError()    { loginError.style.display = "none"; }
+
+    document.getElementById("go-register").addEventListener("click", () => {
+      formLogin.style.display    = "none";
+      formRegister.style.display = "block";
+      loginTitle.textContent     = "Create account";
+      loginSub.textContent       = "Start monitoring your energy";
+      hideError();
+    });
+    document.getElementById("go-login").addEventListener("click", () => {
+      formRegister.style.display = "none";
+      formLogin.style.display    = "block";
+      loginTitle.textContent     = "Welcome back";
+      loginSub.textContent       = "Sign in to your account";
+      hideError();
+    });
+
+    document.getElementById("btn-login").addEventListener("click", async () => {
+      hideError();
+      const email    = document.getElementById("login-email").value.trim();
+      const password = document.getElementById("login-password").value;
+      if (!email || !password) { showError("Please fill in all fields."); return; }
+      try {
+        await signInWithEmailAndPassword(auth, email, password);
+      } catch (e) { showError(friendlyError(e.code)); }
+    });
+
+    document.getElementById("btn-register").addEventListener("click", async () => {
+      hideError();
+      const name     = document.getElementById("reg-name").value.trim();
+      const email    = document.getElementById("reg-email").value.trim();
+      const password = document.getElementById("reg-password").value;
+      if (!name || !email || !password) { showError("Please fill in all fields."); return; }
+      if (password.length < 6) { showError("Password must be at least 6 characters."); return; }
+      try {
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(cred.user, { displayName: name });
+      } catch (e) { showError(friendlyError(e.code)); }
+    });
+
+    function friendlyError(code) {
+      const map = {
+        "auth/user-not-found":       "Account not found. Please register first.",
+        "auth/wrong-password":       "Wrong password. Please try again.",
+        "auth/email-already-in-use": "Email already registered. Please sign in.",
+        "auth/invalid-email":        "Invalid email address.",
+        "auth/too-many-requests":    "Too many attempts. Please try again later."
+      };
+      return map[code] || "Something went wrong. Please try again.";
+    }
+  </script>
+</body>
+</html>

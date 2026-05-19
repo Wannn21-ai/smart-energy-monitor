@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Settings — Smart Energy Monitor</title>
+
+  <meta name="firebase-api-key"            content="NETLIFY_ENV_FIREBASE_API_KEY"/>
+  <meta name="firebase-auth-domain"        content="NETLIFY_ENV_FIREBASE_AUTH_DOMAIN"/>
+  <meta name="firebase-database-url"       content="NETLIFY_ENV_FIREBASE_DATABASE_URL"/>
+  <meta name="firebase-project-id"         content="NETLIFY_ENV_FIREBASE_PROJECT_ID"/>
+  <meta name="firebase-storage-bucket"     content="NETLIFY_ENV_FIREBASE_STORAGE_BUCKET"/>
+  <meta name="firebase-messaging-sender-id" content="NETLIFY_ENV_FIREBASE_MESSAGING_SENDER_ID"/>
+  <meta name="firebase-app-id"             content="NETLIFY_ENV_FIREBASE_APP_ID"/>
+
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main-content" id="main-content">
+      <header class="topbar" id="topbar"></header>
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <div class="page-header-title" id="txt-settings-title">Settings</div>
+            <div class="page-header-sub" id="txt-settings-sub">Manage your preferences and data</div>
+          </div>
+        </div>
+        <div class="settings-grid">
+          <!-- ① Energy Pricing -->
+          <div class="settings-card">
+            <div class="settings-card-title" id="txt-pricing-title">💰 Energy Pricing</div>
+            <div class="form-group">
+              <label class="form-label" id="txt-currency-label">Currency</label>
+              <select id="currency" class="form-select">
+                <option value="IDR">IDR — Indonesian Rupiah</option>
+                <option value="USD">USD — US Dollar</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label" id="txt-tariff-label">Tariff per kWh</label>
+              <input type="number" id="tariff" class="form-input" placeholder="1444.70" step="0.01"/>
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;" id="tariff-converted"></div>
+            <button class="btn btn-primary" id="btn-save-settings" style="width:100%;justify-content:center;">
+              <span id="txt-save-pricing">Save Settings</span>
+            </button>
+          </div>
+          <!-- ② Account -->
+          <div class="settings-card">
+            <div class="settings-card-title" id="txt-account-title">👤 Account</div>
+            <div class="form-group">
+              <label class="form-label" id="txt-name-label">Display Name</label>
+              <input type="text" id="display-name" class="form-input" placeholder="Your name"/>
+            </div>
+            <div class="form-group">
+              <label class="form-label" id="txt-email-label">Email</label>
+              <input type="email" id="display-email" class="form-input" disabled style="opacity:0.5;cursor:not-allowed;"/>
+            </div>
+            <button class="btn btn-primary" id="btn-save-profile" style="width:100%;justify-content:center;">
+              <span id="txt-save-profile">Update Profile</span>
+            </button>
+          </div>
+          <!-- ③ Appearance -->
+          <div class="settings-card">
+            <div class="settings-card-title" id="txt-appearance-title">🎨 Appearance</div>
+            <div class="form-group">
+              <label class="form-label" id="txt-theme-label">Theme</label>
+              <div class="theme-options" id="theme-options">
+                <button class="theme-btn" data-theme="dark">
+                  <span class="theme-dot" style="background:#0a0a0a;border:1px solid #333;"></span>
+                  <span id="txt-theme-dark">Dark</span>
+                </button>
+                <button class="theme-btn" data-theme="darker">
+                  <span class="theme-dot" style="background:#000000;border:1px solid #222;"></span>
+                  <span id="txt-theme-darker">Darker</span>
+                </button>
+                <button class="theme-btn" data-theme="light">
+                  <span class="theme-dot" style="background:#f5f5f5;border:1px solid #ccc;"></span>
+                  <span id="txt-theme-light">Light</span>
+                </button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" id="txt-lang-label">Language</label>
+              <select id="language" class="form-select">
+                <option value="en">English</option>
+                <option value="id">Bahasa Indonesia</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" id="btn-save-appearance" style="width:100%;justify-content:center;">
+              <span id="txt-save-appearance">Save Appearance</span>
+            </button>
+          </div>
+          <!-- ④ Notifications & Dashboard -->
+          <div class="settings-card">
+            <div class="settings-card-title" id="txt-notif-title">🔔 Notifications & Dashboard</div>
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-label" id="txt-notif-device">Device connected notification</div>
+                <div class="toggle-sub" id="txt-notif-device-sub">Show toast when device is plugged in</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="notif-device" checked/>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-label" id="txt-notif-disconnect">Device disconnected notification</div>
+                <div class="toggle-sub" id="txt-notif-disconnect-sub">Show toast when device is unplugged</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="notif-disconnect" checked/>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-label" id="txt-notif-session">Session saved notification</div>
+                <div class="toggle-sub" id="txt-notif-session-sub">Show toast when session is saved</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="notif-session" checked/>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="divider" style="margin:16px 0;"></div>
+            <div class="form-group">
+              <label class="form-label" id="txt-refresh-label">Dashboard refresh interval</label>
+              <select id="refresh-interval" class="form-select">
+                <option value="1000">1 second (most responsive)</option>
+                <option value="3000" selected>3 seconds (recommended)</option>
+                <option value="5000">5 seconds (battery saving)</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" id="btn-save-notif" style="width:100%;justify-content:center;">
+              <span id="txt-save-notif">Save Preferences</span>
+            </button>
+          </div>
+          <!-- ⑤ Data Control -->
+          <div class="settings-card">
+            <div class="settings-card-title" id="txt-data-title">📊 Data Control</div>
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:20px;" id="txt-data-sub">
+              Export or delete all monitoring history data stored on this device.
+            </p>
+            <div style="display:flex;flex-direction:column;gap:12px;">
+              <button class="btn btn-ghost" id="btn-export-all" style="justify-content:center;">
+                <span id="txt-export-all">↓ Export All History CSV</span>
+              </button>
+              <button class="btn btn-danger" id="btn-delete-all" style="justify-content:center;">
+                <span id="txt-delete-all">✕ Delete All History</span>
+              </button>
+            </div>
+          </div>
+          <!-- ⑥ About -->
+          <div class="settings-card">
+            <div class="settings-card-title" id="txt-about-title">ℹ About</div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;justify-content:space-between;font-size:13px;">
+                <span style="color:var(--text-muted);" id="txt-about-app">Application</span>
+                <span style="color:var(--text-secondary);font-family:var(--font-display);">Smart Energy Monitor</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;font-size:13px;">
+                <span style="color:var(--text-muted);" id="txt-about-ver">Version</span>
+                <span style="color:var(--text-secondary);font-family:var(--font-display);">2.0.0</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;font-size:13px;">
+                <span style="color:var(--text-muted);" id="txt-about-hw">Hardware</span>
+                <span style="color:var(--text-secondary);font-family:var(--font-display);">ESP32 + PZEM-004T</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;font-size:13px;">
+                <span style="color:var(--text-muted);" id="txt-about-cloud">Cloud</span>
+                <span style="color:var(--text-secondary);font-family:var(--font-display);">Firebase Realtime DB</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="js/settings.js"></script>
+</body>
+</html>

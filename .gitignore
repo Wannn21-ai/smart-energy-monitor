@@ -1,0 +1,9 @@
+# Credentials ESP32 — JANGAN PERNAH COMMIT
+energy-monitor-system/include/credentials.h
+
+# PlatformIO build artifacts
+energy-monitor-system/.pio/
+
+# OS files
+.DS_Store
+Thumbs.db

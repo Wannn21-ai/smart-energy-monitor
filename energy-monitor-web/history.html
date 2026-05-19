@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>History — Smart Energy Monitor</title>
+
+  <meta name="firebase-api-key"            content="NETLIFY_ENV_FIREBASE_API_KEY"/>
+  <meta name="firebase-auth-domain"        content="NETLIFY_ENV_FIREBASE_AUTH_DOMAIN"/>
+  <meta name="firebase-database-url"       content="NETLIFY_ENV_FIREBASE_DATABASE_URL"/>
+  <meta name="firebase-project-id"         content="NETLIFY_ENV_FIREBASE_PROJECT_ID"/>
+  <meta name="firebase-storage-bucket"     content="NETLIFY_ENV_FIREBASE_STORAGE_BUCKET"/>
+  <meta name="firebase-messaging-sender-id" content="NETLIFY_ENV_FIREBASE_MESSAGING_SENDER_ID"/>
+  <meta name="firebase-app-id"             content="NETLIFY_ENV_FIREBASE_APP_ID"/>
+
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main-content" id="main-content">
+      <header class="topbar" id="topbar"></header>
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <div class="page-header-title">History</div>
+            <div class="page-header-sub" id="history-count">0 sessions recorded</div>
+          </div>
+          <div style="display:flex;gap:10px;">
+            <button class="btn btn-ghost" id="btn-export-all">↓ Export All CSV</button>
+            <button class="btn btn-danger" id="btn-delete-all">✕ Delete All</button>
+          </div>
+        </div>
+        <div class="device-tabs" id="filter-tabs">
+          <button class="device-tab active" data-filter="all">All Devices</button>
+        </div>
+        <div class="search-wrap">
+          <span class="search-icon">⌕</span>
+          <input type="text" class="search-input" id="search-input" placeholder="Search by device name..."/>
+        </div>
+        <div class="history-list" id="history-list"></div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="js/history.js"></script>
+</body>
+</html>
