@@ -30,6 +30,16 @@
     <div class="main-content" id="main-content">
       <header class="topbar" id="topbar"></header>
       <div class="page-content">
+
+        <!-- OVERLOAD BANNER -->
+      <div id="overload-banner" style="
+        display:none; align-items:center; gap:10px;
+        background:var(--red-dim); border:1px solid rgba(255,23,68,0.4);
+        border-radius:var(--radius-md); padding:12px 20px; margin-bottom:20px;
+        color:var(--red); font-weight:600; font-size:13px;
+        animation: pulse-red 1s infinite alternate;">
+      </div>
+
         <!-- PAGE HEADER -->
         <div class="page-header">
           <div>
@@ -108,6 +118,32 @@
             <div class="stat-sub" id="sub-web-status">Web: offline</div>
           </div>
         </div>
+
+        <!-- ADVANCED READINGS (Power Factor, Frequency, Apparent Power) -->
+      <div class="chart-card" style="margin-bottom:24px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+          <div class="chart-card-title">Advanced Readings</div>
+          <span style="font-size:11px;color:var(--text-muted);">For technical reference</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px;">
+          <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-md);padding:16px;">
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">Power Factor</div>
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:700;color:var(--cyan);" id="val-pf">—</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">0 = poor · 1 = ideal</div>
+          </div>
+          <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-md);padding:16px;">
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">Frequency</div>
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:700;color:var(--green);" id="val-freq">—</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Hz · standard: 50 Hz</div>
+          </div>
+          <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-md);padding:16px;">
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">Apparent Power</div>
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:700;color:var(--amber);" id="val-apparent">—</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">VA · V × I</div>
+          </div>
+        </div>
+      </div>
+
         <!-- CHARTS -->
         <div class="chart-grid">
           <div class="chart-card .chart-inner">
@@ -150,6 +186,14 @@
   </div>
 
   <button class="fab" id="fab-add">＋</button>
+
+  <style>
+@keyframes pulse-red {
+  from { box-shadow: 0 0 0 0 rgba(255,23,68,0.4); }
+  to   { box-shadow: 0 0 0 8px rgba(255,23,68,0); }
+}
+</style>
+
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script type="module" src="js/dashboard.js"></script>
 </body>
