@@ -38,10 +38,10 @@
     Referrer-Policy        = "strict-origin-when-cross-origin"
     # CSP: izinkan Firebase, Google Fonts, CDN Chart.js
     Content-Security-Policy = """
-  default-src 'self';
-  script-src 'self' 'unsafe-inline' https://www.gstatic.com https://cdn.jsdelivr.net https://*.firebasedatabase.app;
-  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
-  font-src 'self' https://fonts.gstatic.com;
-  connect-src 'self' https://*.firebaseio.com https://*.googleapis.com wss://*.firebaseio.com https://*.firebasedatabase.app;
-  img-src 'self' data:;
-"""
+      default-src 'self';
+      script-src 'self' 'unsafe-inline' https://www.gstatic.com https://cdn.jsdelivr.net https://*.firebasedatabase.app;
+      style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+      font-src 'self' https://fonts.gstatic.com;
+      connect-src 'self' https://*.firebaseio.com https://*.googleapis.com wss://*.firebaseio.com https://*.firebasedatabase.app; wss://*.firebasedatabase.app;
+      img-src 'self' data:;
+    """
