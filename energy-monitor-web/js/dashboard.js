@@ -2,7 +2,7 @@ import {
   requireAuth, renderShell, fillUserInfo, setSystemStatus,
   showToast, applyTheme, updateChartColors, startStatusWatcher
 } from "./auth-guard.js";
-import { db, ref, onValue, set } from "./firebase-config.js";
+import { db, ref, onValue, set, push, get } from "./firebase-config.js";
 
 // ================= INIT =================
 const user = await requireAuth();
@@ -11,72 +11,123 @@ fillUserInfo(user);
 startStatusWatcher();
 const uid = user.uid;
 
+// ================= FIREBASE PATHS =================
+const historyRef  = ref(db, `users/${uid}/history`);
+const settingsRef = ref(db, `users/${uid}/settings`);
+const activeRef   = ref(db, `users/${uid}/activeSession`);
+
 // ================= SETTINGS =================
 const SETTING_DEFAULTS = {
   currency: "IDR", tariff: 1444.70, overloadThreshold: 2000,
-  notifDevice: true, notifDisconnect: true, notifSession: true, 
+  notifDevice: true, notifDisconnect: true, notifSession: true,
   notifOverload: true, refreshInterval: 3000
 };
 let settings = { ...SETTING_DEFAULTS };
-try {
-  const saved = JSON.parse(localStorage.getItem(`sem_settings_${uid}`));
-  if (saved) settings = { ...SETTING_DEFAULTS, ...saved };
-} catch {}
+
+async function loadSettings() {
+  // localStorage sebagai cache instant
+  try {
+    const cached = JSON.parse(localStorage.getItem(`sem_settings_${uid}`));
+    if (cached) settings = { ...SETTING_DEFAULTS, ...cached };
+  } catch {}
+  // Firebase sebagai sumber kebenaran
+  try {
+    const snap = await get(settingsRef);
+    if (snap.exists()) {
+      settings = { ...SETTING_DEFAULTS, ...snap.val() };
+      localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+    }
+  } catch {}
+  // Re-sync setiap 10 detik (settings bisa berubah dari device lain)
+  setInterval(async () => {
+    try {
+      const snap = await get(settingsRef);
+      if (snap.exists()) {
+        const remote = { ...SETTING_DEFAULTS, ...snap.val() };
+        if (JSON.stringify(remote) !== JSON.stringify(settings)) {
+          settings = remote;
+          localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+          startMetersInterval(); // restart jika refreshInterval berubah
+        }
+      }
+    } catch {}
+  }, 10000);
+}
+
 const savedTheme = localStorage.getItem(`sem_theme_${uid}`);
 if (savedTheme) applyTheme(savedTheme);
 
 // ================= STATE =================
-let voltage = 0, current = 0;
-let firebasePower = 0, firebaseEnergy = 0, firebaseTimestamp = 0;
+let voltage = 0, current = 0, firebasePower = 0, firebaseTimestamp = 0;
+let firebasePF = 0, firebaseFreq = 0, firebaseApparent = 0;
+let firebaseEnergy = 0, firebaseCost = 0;
+let firebaseOverload = false, firebaseThreshold = 2000;
 let systemInternet = false, systemOnline = false, deviceOnline = false;
-let prevDeviceConnected = false;
+let prevDeviceConnected = false, prevOverload = false;
 let isRunning = false, startTime = null, timerInterval = null;
 let sessionSaved = false;
-let activeDevice = null;
-let waitingForName = false;
-let metersInterval = null;
+let activeDevice = null, waitingForName = false, metersInterval = null;
 let energyBaseline = 0;
+let sessionCount = 0;
 
-// ================= STORAGE =================
-const storageKey = key => `sem_${key}_${uid}`;
-function getStorage(key) {
-  try { return JSON.parse(localStorage.getItem(storageKey(key))) ||
-      (key === "history" || key === "devices" ? [] : null); } 
-  catch { return key === "history" || key === "devices" ? [] : null; }
+// ================= STORAGE (Firebase) =================
+async function getHistory() {
+  try {
+    const snap = await get(historyRef);
+    if (!snap.exists()) return [];
+    return Object.entries(snap.val())
+      .map(([key, val]) => ({ ...val, _key: key }))
+      .sort((a, b) => b.timestamp - a.timestamp);
+  } catch { return []; }
 }
-function setStorage(key, val) { localStorage.setItem(storageKey(key), JSON.stringify(val)); }
-const getHistory    = () => getStorage("history");
-const saveHistory   = d  => setStorage("history", d);
-const getDevices    = () => getStorage("devices");
-const saveDevices   = d  => setStorage("devices", d);
-const getActiveDevice = () => getStorage("active");
-const saveActiveDevice = d => setStorage("active", d);
+
+async function pushHistory(entry) {
+  try { await push(historyRef, entry); } catch (e) { console.error("pushHistory:", e); }
+}
+
+async function getSessionCount() {
+  try {
+    const snap = await get(historyRef);
+    return snap.exists() ? Object.keys(snap.val()).length : 0;
+  } catch { return 0; }
+}
+
+// Active session disimpan di Firebase supaya persist antar device/tab
+async function saveActiveSession(data) {
+  try { await set(activeRef, data); } catch {}
+}
+async function loadActiveSession() {
+  try {
+    const snap = await get(activeRef);
+    return snap.exists() ? snap.val() : null;
+  } catch { return null; }
+}
 
 // ================= ELEMENTS =================
-const valVoltage     = document.getElementById("val-voltage");
-const valCurrent     = document.getElementById("val-current");
-const valPower       = document.getElementById("val-power");
-const valEnergy      = document.getElementById("val-energy");
-const valCost        = document.getElementById("val-cost");
-const valDeviceName  = document.getElementById("val-device-name");
-const subDuration    = document.getElementById("sub-duration");
-const subTariff      = document.getElementById("sub-tariff");
-const subWebStatus   = document.getElementById("sub-web-status");
+const valVoltage      = document.getElementById("val-voltage");
+const valCurrent      = document.getElementById("val-current");
+const valPower        = document.getElementById("val-power");
+const valEnergy       = document.getElementById("val-energy");
+const valCost         = document.getElementById("val-cost");
+const valDeviceName   = document.getElementById("val-device-name");
+const subDuration     = document.getElementById("sub-duration");
+const subTariff       = document.getElementById("sub-tariff");
+const subWebStatus    = document.getElementById("sub-web-status");
 const valSessionCount = document.getElementById("val-session-count");
-const activeDevLabel = document.getElementById("active-device-label");
-const badgeStatus    = document.getElementById("badge-device-status");
-const deviceTabsEl   = document.getElementById("device-tabs");
-const btnStop        = document.getElementById("btn-stop");
-const fab            = document.getElementById("fab-add");
-const modalAdd       = document.getElementById("modal-add-device");
-const modalTitle     = document.querySelector("#modal-add-device .modal-title");
-const modalSub       = document.querySelector("#modal-add-device .modal-sub");
-const inputDevName   = document.getElementById("input-device-name");
-const btnCancelDev   = document.getElementById("btn-cancel-device");
-const btnSaveDev     = document.getElementById("btn-save-device");
-const gaugeVoltage   = document.getElementById("gauge-voltage");
-const gaugeCurrent   = document.getElementById("gauge-current");
-const overloadBanner   = document.getElementById("overload-banner");
+const activeDevLabel  = document.getElementById("active-device-label");
+const badgeStatus     = document.getElementById("badge-device-status");
+const deviceTabsEl    = document.getElementById("device-tabs");
+const btnStop         = document.getElementById("btn-stop");
+const fab             = document.getElementById("fab-add");
+const modalAdd        = document.getElementById("modal-add-device");
+const modalTitle      = document.querySelector("#modal-add-device .modal-title");
+const modalSub        = document.querySelector("#modal-add-device .modal-sub");
+const inputDevName    = document.getElementById("input-device-name");
+const btnCancelDev    = document.getElementById("btn-cancel-device");
+const btnSaveDev      = document.getElementById("btn-save-device");
+const gaugeVoltage    = document.getElementById("gauge-voltage");
+const gaugeCurrent    = document.getElementById("gauge-current");
+const overloadBanner  = document.getElementById("overload-banner");
 
 // ================= CHART OPTIONS =================
 function chartTickColor() {
@@ -85,13 +136,13 @@ function chartTickColor() {
 function chartGridColor() {
   return getComputedStyle(document.documentElement).getPropertyValue("--chart-grid").trim() || "rgba(255,255,255,0.04)";
 }
-function makeChartOpts(extraScales = {}) {
+function makeChartOpts(extra = {}) {
   return {
     responsive: true, maintainAspectRatio: false,
     plugins: { legend: { display: false } },
     scales: {
-      x: { ticks: { color: chartTickColor(), font: { size: 10 } }, grid: { color: chartGridColor() }, ...extraScales.x },
-      y: { ticks: { color: chartTickColor(), font: { size: 10 } }, grid: { color: chartGridColor() }, ...extraScales.y }
+      x: { ticks: { color: chartTickColor(), font: { size: 10 } }, grid: { color: chartGridColor() }, ...extra.x },
+      y: { ticks: { color: chartTickColor(), font: { size: 10 } }, grid: { color: chartGridColor() }, ...extra.y }
     }
   };
 }
@@ -120,29 +171,26 @@ const pieChart = new Chart(document.getElementById("chart-pie"), {
 });
 
 // ================= HELPERS =================
-const symbol = () => settings.currency === "USD" ? "$" : "Rp";
-const formatCost = v => settings.currency === "USD"
+const symbol     = () => settings.currency === "USD" ? "$" : "Rp";
+const formatCost = v  => settings.currency === "USD"
   ? `$ ${v.toFixed(2)}`
   : `Rp ${Math.round(v).toLocaleString("id-ID")}`;
 
-function getSessionEnergy() { return Math.max(0, firebaseEnergy - energyBaseline);}
-function getSessionCost() { return getSessionEnergy() * settings.tariff; }
+function getSessionEnergy() { return Math.max(0, firebaseEnergy - energyBaseline); }
+function getSessionCost()   { return getSessionEnergy() * settings.tariff; }
 
-function generateUniqueName(base) {
-  const used = getHistory().map(i => i.name);
-  if (!used.includes(base)) return base;
+function generateUniqueName(base, usedNames) {
+  if (!usedNames.includes(base)) return base;
   let c = 2;
-  while (used.includes(`${base} ${c}`)) c++;
+  while (usedNames.includes(`${base} ${c}`)) c++;
   return `${base} ${c}`;
 }
 function setGauge(el, val, min, max) {
   el.style.strokeDashoffset = 232 - Math.max(0, Math.min(1, (val - min) / (max - min))) * 232;
 }
 function clearDisplay() {
-  valVoltage.textContent = "0";
-  valCurrent.textContent = "0.00";
-  valPower.textContent   = "0";
-  valEnergy.textContent  = "0.000";
+  valVoltage.textContent = "0"; valCurrent.textContent = "0.00";
+  valPower.textContent   = "0"; valEnergy.textContent  = "0.000";
   valCost.textContent    = formatCost(0);
   setGauge(gaugeVoltage, 0, 190, 240);
   setGauge(gaugeCurrent, 0, 0, 16);
@@ -153,12 +201,10 @@ function updateDisplay() {
   valVoltage.textContent = voltage.toFixed(1);
   valCurrent.textContent = current.toFixed(2);
   valPower.textContent   = firebasePower.toFixed(0);
-  valEnergy.textContent  = sessEnergy.toFixed(3);   // FIX BUG 2: energy sesi saja
-  valCost.textContent    = formatCost(sessCost);    // FIX BUG 2: cost sesi saja
+  valEnergy.textContent  = sessEnergy.toFixed(3);
+  valCost.textContent    = formatCost(sessCost);
   setGauge(gaugeVoltage, voltage, 190, 240);
   setGauge(gaugeCurrent, current, 0, 16);
-
-  // Update advanced readings (PF, Frekuensi, Apparent Power)
   const elPF   = document.getElementById("val-pf");
   const elFreq = document.getElementById("val-freq");
   const elApp  = document.getElementById("val-apparent");
@@ -184,71 +230,67 @@ function getDuration() {
 }
 function setDeviceBadge(state) {
   const map = {
-    connected: ["badge online",   "● Connected"],
-    overload:  ["badge overload", "⚠ Overload"],
-    idle:      ["badge idle",     "● Idle"],
-    offline:   ["badge offline",  "● Offline"],
-    unknown:   ["badge unknown",  "● Unknown"]
+    connected: ["badge online",  "● Connected"],
+    overload:  ["badge offline", "⚠ Overload!"],
+    idle:      ["badge idle",    "● Idle"],
+    offline:   ["badge offline", "● Offline"],
+    unknown:   ["badge unknown", "● Unknown"]
   };
   const [cls, txt] = map[state] || map.unknown;
-  badgeStatus.className  = cls;
-  badgeStatus.textContent = txt;
+  badgeStatus.className = cls; badgeStatus.textContent = txt;
 }
-function updateSessionCount() { valSessionCount.textContent = getHistory().length; }
+async function updateSessionCount() {
+  sessionCount = await getSessionCount();
+  valSessionCount.textContent = sessionCount;
+}
 
 // ================= OVERLOAD BANNER =================
 function setOverloadBanner(active) {
   if (!overloadBanner) return;
-  if (active) {
-    overloadBanner.style.display = "flex";
-    overloadBanner.textContent   =
-      `⚠ OVERLOAD DETECTED — Power exceeds ${firebaseThreshold}W threshold!`;
-  } else {
-    overloadBanner.style.display = "none";
-  }
+  overloadBanner.style.display = active ? "flex" : "none";
+  if (active) overloadBanner.textContent = `⚠ OVERLOAD DETECTED — Power exceeds ${firebaseThreshold}W threshold!`;
 }
 
 // ================= DEVICE TABS =================
-function renderDeviceTabs() {
+async function renderDeviceTabs() {
   deviceTabsEl.innerHTML = "";
-  getDevices().forEach(dev => {
+  const history = await getHistory();
+  const names = [...new Set(history.map(h => h.name))];
+  names.forEach(name => {
     const btn = document.createElement("button");
-    btn.className = `device-tab${activeDevice?.id === dev.id ? " active" : ""}`;
-    btn.textContent = dev.name;
+    btn.className = `device-tab${activeDevice?.name === name ? " active" : ""}`;
+    btn.textContent = name;
     deviceTabsEl.appendChild(btn);
   });
 }
 
 // ================= SAVE SESSION =================
-function saveSession() {
+async function saveSession() {
   const sessEnergy = getSessionEnergy();
   const sessCost   = getSessionCost();
   if (sessionSaved || !activeDevice || sessEnergy <= 0) return;
-  const history = getHistory();
-  history.unshift({
-    id: Date.now(), name: activeDevice.name, duration: getDuration(),
-    power:  parseFloat(firebasePower.toFixed(1)),
-    energy: parseFloat(sessEnergy.toFixed(3)),   
-    cost:   formatCost(sessCost), costRaw: sessCost,
-    date: new Date().toLocaleDateString("id-ID"), timestamp: Date.now()
+  await pushHistory({
+    name:      activeDevice.name,
+    duration:  getDuration(),
+    power:     parseFloat(firebasePower.toFixed(1)),
+    energy:    parseFloat(sessEnergy.toFixed(3)),
+    cost:      formatCost(sessCost),
+    costRaw:   sessCost,
+    date:      new Date().toLocaleDateString("id-ID"),
+    timestamp: Date.now()
   });
-  saveHistory(history);
-  const devices = getDevices();
-  if (!devices.find(d => d.id === activeDevice.id)) {
-    devices.push({ id: activeDevice.id, name: activeDevice.name });
-    saveDevices(devices);
-  }
-  updateSessionCount(); updateBarPie();
   sessionSaved = true;
+  await updateSessionCount();
+  await updateBarPie();
   if (settings.notifSession) showToast(`Sesi "${activeDevice.name}" tersimpan ✓`, "success");
 }
 
 // ================= RESET =================
-function resetMonitoring() {
+async function resetMonitoring() {
   clearInterval(timerInterval);
-  timerInterval  = null; startTime = null; isRunning = false;
-  sessionSaved   = false; energyBaseline = 0; activeDevice   = null;
-  saveActiveDevice(null);
+  timerInterval = null; startTime = null; isRunning = false;
+  sessionSaved = false; energyBaseline = 0; activeDevice = null;
+  await saveActiveSession(null);
   voltage = current = firebasePower = 0;
   clearDisplay();
   subDuration.textContent    = "Duration: 00:00:00";
@@ -261,12 +303,12 @@ function resetMonitoring() {
 }
 
 // ================= START =================
-function startMonitoring(name) {
+async function startMonitoring(name) {
   activeDevice   = { id: `dev_${Date.now()}`, name };
   energyBaseline = firebaseEnergy;
   startTime      = Date.now();
-  isRunning      = true; sessionSaved   = false;
-  saveActiveDevice({ ...activeDevice, startTime:startTime, energyBaseline: energyBaseline });
+  isRunning      = true; sessionSaved = false;
+  await saveActiveSession({ ...activeDevice, startTime, energyBaseline });
   valDeviceName.textContent  = name;
   activeDevLabel.textContent = `Monitoring: ${name}`;
   btnStop.style.display      = "inline-flex";
@@ -278,11 +320,14 @@ function startMonitoring(name) {
 }
 
 // ================= CHART UPDATE =================
-function updateBarPie() {
-  const history  = getHistory(); const byDevice = {};
+async function updateBarPie() {
+  const history  = await getHistory();
+  const byDevice = {};
   history.forEach(s => {
     if (!byDevice[s.name]) byDevice[s.name] = { power: 0, energy: 0, count: 0 };
-    byDevice[s.name].power  += s.power; byDevice[s.name].energy += s.energy; byDevice[s.name].count  += 1;
+    byDevice[s.name].power  += s.power;
+    byDevice[s.name].energy += s.energy;
+    byDevice[s.name].count++;
   });
   const names    = Object.keys(byDevice);
   const powers   = names.map(n => parseFloat((byDevice[n].power / byDevice[n].count).toFixed(1)));
@@ -292,47 +337,59 @@ function updateBarPie() {
 }
 
 // ================= MODAL =================
-function openModalAuto() {
+async function openModalAuto() {
   waitingForName = true;
+  // Nama unik dari history yang sudah ada
+  const history   = await getHistory();
+  const usedNames = history.map(h => h.name);
   modalTitle.textContent = "⚡ Device Terdeteksi!";
-  modalSub.textContent   = "Berikan nama untuk device yang baru terhubung sebelum monitoring dimulai.";
+  modalSub.textContent   = "Berikan nama untuk device yang baru terhubung.";
   inputDevName.value     = "";
+  inputDevName.dataset.usedNames = JSON.stringify(usedNames);
   modalAdd.classList.add("open");
   setTimeout(() => inputDevName.focus(), 100);
 }
-function openModalManual() {
-  if (!deviceOnline) { showToast("Tidak ada device yang terhubung ke sistem", "error"); return; }
+async function openModalManual() {
+  if (!deviceOnline) { showToast("Tidak ada device yang terhubung", "error"); return; }
   if (isRunning && activeDevice) { showToast(`"${activeDevice.name}" sedang dimonitor`, "error"); return; }
   waitingForName = false;
+  const history   = await getHistory();
+  const usedNames = history.map(h => h.name);
   modalTitle.textContent = "Tambah Device";
   modalSub.textContent   = "Berikan nama untuk device yang terhubung.";
   inputDevName.value     = "";
+  inputDevName.dataset.usedNames = JSON.stringify(usedNames);
   modalAdd.classList.add("open");
   setTimeout(() => inputDevName.focus(), 100);
 }
 function closeModal() {
-  modalAdd.classList.remove("open"); inputDevName.value = ""; waitingForName     = false;
+  modalAdd.classList.remove("open"); inputDevName.value = ""; waitingForName = false;
 }
 
 fab.addEventListener("click", openModalManual);
 btnCancelDev.addEventListener("click", closeModal);
 modalAdd.addEventListener("click", e => { if (e.target === modalAdd && !waitingForName) closeModal(); });
-btnSaveDev.addEventListener("click", () => {
+btnSaveDev.addEventListener("click", async () => {
+  const usedNames = JSON.parse(inputDevName.dataset.usedNames || "[]");
   let name = inputDevName.value.trim();
-  if (!name) name = generateUniqueName("Device");
-  else name = generateUniqueName(name);
+  if (!name) name = generateUniqueName("Device", usedNames);
+  else name = generateUniqueName(name, usedNames);
   if (name.length > 24) { showToast("Maksimal 24 karakter", "error"); return; }
-  closeModal(); startMonitoring(name);
+  closeModal();
+  await startMonitoring(name);
 });
 inputDevName.addEventListener("keydown", e => { if (e.key === "Enter") btnSaveDev.click(); });
 
 // ================= STOP =================
-btnStop.addEventListener("click", () => {
+btnStop.addEventListener("click", async () => {
   if (!isRunning || !activeDevice) { showToast("Tidak ada sesi yang berjalan", "error"); return; }
-  saveSession(); resetMonitoring();
+  await saveSession();
+  await resetMonitoring();
 });
 
-// ================= FIREBASE =================
+// ================= FIREBASE LIVE LISTENER =================
+// FIX: gunakan onValue (realtime) bukan polling interval
+// Setiap ada update dari ESP32, variabel langsung terupdate
 onValue(ref(db, "live"), snapshot => {
   const data = snapshot.val();
   if (!data) return;
@@ -341,48 +398,53 @@ onValue(ref(db, "live"), snapshot => {
   firebaseTimestamp = sys.timestamp || 0;
   firebaseThreshold = sys.threshold || settings.overloadThreshold;
   const dev = data.device || {};
-  voltage       = dev.voltage || 0;
-  current       = dev.current || 0;
-  firebasePower  = dev.power   || 0;
-  firebaseApparent = dev.apparent || 0;
-  firebasePF     = dev.pf || 0;
-  firebaseFreq   = dev.frequency || 0;
-  firebaseEnergy = dev.energy  || 0;
-  firebaseCost   = dev.cost    || 0;
-  firebaseOverload = dev.overload === true;
+  voltage          = dev.voltage   || 0;
+  current          = dev.current   || 0;
+  firebasePower    = dev.power     || 0;
+  firebaseApparent = dev.apparent  || 0;
+  firebasePF       = dev.pf        || 0;
+  firebaseFreq     = dev.frequency || 0;
+  firebaseEnergy   = dev.energy    || 0;
+  firebaseCost     = dev.cost      || 0;
+  firebaseOverload = dev.overload  === true;
 });
 
 // ================= MAIN LOOP =================
 function updateMeters() {
   const now  = Math.floor(Date.now() / 1000);
   const diff = now - firebaseTimestamp;
+
+  // FIX: systemOnline hanya butuh internet=true dan timestamp fresh (≤120 detik)
   systemOnline = systemInternet && firebaseTimestamp > 0 && diff <= 120;
-  deviceOnline = systemOnline && (current > 0.01 && firebasePower > 0.5);
+
+  // FIX: deviceOnline = systemOnline + ada arus & daya
+  // Nilai current & firebasePower sudah diupdate oleh onValue di atas
+  deviceOnline = systemOnline && current > 0.01 && firebasePower > 0.5;
 
   setSystemStatus(systemOnline);
   subWebStatus.textContent = `Web: ${systemOnline ? "online" : "offline"}`;
   subTariff.textContent    = `Tariff: ${symbol()} ${settings.tariff.toLocaleString("id-ID")}/kWh`;
 
-  //device baru connect
+  // Device baru connect
   if (!prevDeviceConnected && deviceOnline) {
     if (!isRunning && !waitingForName) {
-      if (settings.notifDevice) showToast("⚡ Device baru terdeteksi! Silakan beri nama device.", "success");
+      if (settings.notifDevice) showToast("⚡ Device baru terdeteksi! Silakan beri nama.", "success");
       openModalAuto();
     }
   }
-// device dicabut
+  // Device disconnect
   if (prevDeviceConnected && !deviceOnline && systemOnline) {
     if (waitingForName) {
       closeModal(); showToast("Device dicabut sebelum diberi nama", "error");
     } else if (isRunning && activeDevice) {
-      if (settings.notifDisconnect) 
-        showToast(`Device "${activeDevice.name}" dicabut — sesi dihentikan otomatis`, "error");
-      saveSession(); resetMonitoring();
+      if (settings.notifDisconnect)
+        showToast(`Device "${activeDevice.name}" dicabut — sesi dihentikan`, "error");
+      saveSession().then(() => resetMonitoring());
     }
   }
   prevDeviceConnected = deviceOnline;
 
-  // Overload detection dari Firebase flag
+  // Overload
   if (firebaseOverload && !prevOverload) {
     if (settings.notifOverload)
       showToast(`⚠ OVERLOAD! Daya melebihi ${firebaseThreshold}W`, "error");
@@ -416,18 +478,13 @@ function startMetersInterval() {
   if (metersInterval) clearInterval(metersInterval);
   metersInterval = setInterval(updateMeters, settings.refreshInterval || 3000);
 }
-setInterval(() => {
-  try {
-    const saved = JSON.parse(localStorage.getItem(`sem_settings_${uid}`));
-    if (saved && saved.refreshInterval && saved.refreshInterval !== settings.refreshInterval) {
-      settings = { ...SETTING_DEFAULTS, ...saved }; startMetersInterval();
-    }
-  } catch {}
-}, 5000);
 
 // ================= INIT =================
-const savedActive = getActiveDevice();
-if (savedActive) {
+await loadSettings();
+
+// Restore active session dari Firebase
+const savedActive = await loadActiveSession();
+if (savedActive && savedActive.id) {
   activeDevice   = { id: savedActive.id, name: savedActive.name };
   startTime      = savedActive.startTime      || null;
   energyBaseline = savedActive.energyBaseline || 0;
@@ -437,7 +494,11 @@ if (savedActive) {
   btnStop.style.display      = "inline-flex";
   if (startTime) { clearInterval(timerInterval); timerInterval = setInterval(updateTimer, 1000); }
 }
+
 updateChartColors(lineChart, barChart, pieChart);
 pieChart.options.plugins.legend.labels.color = chartTickColor();
 pieChart.update("none");
-renderDeviceTabs(); updateSessionCount(); updateBarPie(); startMetersInterval();
+await renderDeviceTabs();
+await updateSessionCount();
+await updateBarPie();
+startMetersInterval();

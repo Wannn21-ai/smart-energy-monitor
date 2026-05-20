@@ -1,20 +1,31 @@
 import { requireAuth, renderShell, fillUserInfo, showToast, startStatusWatcher } from "./auth-guard.js";
+import { db, ref, set, get, onValue } from "./firebase-config.js";
+
 const user = await requireAuth();
 renderShell("history", "HISTORY");
 fillUserInfo(user);
 startStatusWatcher();
 const uid = user.uid;
 
-// ================= DATA =================
-function getHistory() {
-  try { return JSON.parse(localStorage.getItem(`sem_history_${uid}`)) || []; }
-  catch { return []; }
-}
-function saveHistory(data) { localStorage.setItem(`sem_history_${uid}`, JSON.stringify(data)); }
+// ================= FIREBASE =================
+const historyRef = ref(db, `users/${uid}/history`);
 
-let historyData    = getHistory();
-let activeFilter   = "all";
-let searchKeyword  = "";
+let historyData  = [];
+let activeFilter = "all";
+let searchKeyword = "";
+
+// ================= LOAD =================
+// Gunakan onValue supaya realtime — kalau save dari device lain langsung update
+onValue(historyRef, snapshot => {
+  if (!snapshot.exists()) {
+    historyData = [];
+  } else {
+    historyData = Object.entries(snapshot.val())
+      .map(([key, val]) => ({ ...val, _key: key }))
+      .sort((a, b) => b.timestamp - a.timestamp);
+  }
+  render();
+});
 
 // ================= ELEMENTS =================
 const listEl       = document.getElementById("history-list");
@@ -36,24 +47,20 @@ function buildFilterTabs() {
     filterTabsEl.appendChild(btn);
   });
 }
-
 filterTabsEl.addEventListener("click", e => {
-  const btn = e.target.closest(".device-tab"); if (!btn) return;
+  const btn = e.target.closest(".device-tab");
+  if (!btn) return;
   activeFilter = btn.dataset.filter;
   buildFilterTabs(); render();
 });
 
 // ================= RENDER =================
 function render() {
-  historyData = getHistory();
   buildFilterTabs();
-
   let data = historyData;
   if (activeFilter !== "all") data = data.filter(s => s.name === activeFilter);
-  if (searchKeyword)          data = data.filter(s => s.name.toLowerCase().includes(searchKeyword));
-
+  if (searchKeyword) data = data.filter(s => s.name.toLowerCase().includes(searchKeyword));
   countEl.textContent = `${data.length} session${data.length !== 1 ? "s" : ""} recorded`;
-
   if (data.length === 0) {
     listEl.innerHTML = `
       <div class="empty-state">
@@ -63,14 +70,11 @@ function render() {
       </div>`;
     return;
   }
-
   listEl.innerHTML = "";
   data.forEach(session => {
     const card = document.createElement("div");
     card.className = "history-card";
-    // FIX: simpan session.id di data attribute, bukan array index
-    // Index bisa berubah jika ada filter aktif atau item dihapus sebelumnya
-    card.dataset.id = session.id;
+    card.dataset.key = session._key;
     card.innerHTML = `
       <div>
         <div class="history-card-name">${session.name}</div>
@@ -85,8 +89,8 @@ function render() {
         <div>
           <div class="history-date">${session.date}</div>
           <div style="display:flex;gap:8px;justify-content:flex-end;">
-            <button class="btn btn-icon btn-export" data-id="${session.id}" title="Export CSV">↓</button>
-            <button class="btn btn-danger btn-delete" data-id="${session.id}" title="Delete">✕</button>
+            <button class="btn btn-icon btn-export" data-key="${session._key}" title="Export CSV">↓</button>
+            <button class="btn btn-danger btn-delete" data-key="${session._key}" title="Delete">✕</button>
           </div>
         </div>
       </div>`;
@@ -95,40 +99,39 @@ function render() {
 }
 
 // ================= CLICK EVENTS =================
-listEl.addEventListener("click", e => {
+listEl.addEventListener("click", async e => {
   // Export single
   if (e.target.classList.contains("btn-export")) {
     e.stopPropagation();
-    const id      = Number(e.target.dataset.id);
-    const session = historyData.find(s => s.id === id);
+    const key     = e.target.dataset.key;
+    const session = historyData.find(s => s._key === key);
     if (session) exportSingleCSV(session);
     return;
   }
-
-  // FIX: delete by id bukan index — aman meski filter aktif atau urutan berubah
+  // Delete single — hapus dari Firebase pakai key
   if (e.target.classList.contains("btn-delete")) {
     e.stopPropagation();
-    const id = Number(e.target.dataset.id);
+    const key = e.target.dataset.key;
     if (!confirm("Delete this session?")) return;
-    historyData = historyData.filter(s => s.id !== id);
-    saveHistory(historyData);
-    showToast("Session deleted", "");
-    render();
+    try {
+      await set(ref(db, `users/${uid}/history/${key}`), null);
+      showToast("Session deleted", "");
+    } catch { showToast("Failed to delete", "error"); }
     return;
   }
-
-  // Open detail — simpan id, bukan index
+  // Open detail
   const card = e.target.closest(".history-card");
   if (card) {
-    // FIX: simpan session id bukan realIndex agar tidak salah halaman
-    localStorage.setItem(`sem_selected_${uid}`, card.dataset.id);
+    // Simpan key ke sessionStorage supaya detail page bisa ambil dari Firebase
+    sessionStorage.setItem(`sem_selected_key_${uid}`, card.dataset.key);
     window.location.href = "history-detail.html";
   }
 });
 
 // ================= SEARCH =================
 searchInput.addEventListener("input", () => {
-  searchKeyword = searchInput.value.toLowerCase().trim(); render();
+  searchKeyword = searchInput.value.toLowerCase().trim();
+  render();
 });
 
 // ================= EXPORT ALL =================
@@ -141,11 +144,13 @@ btnExportAll.addEventListener("click", () => {
 });
 
 // ================= DELETE ALL =================
-btnDeleteAll.addEventListener("click", () => {
+btnDeleteAll.addEventListener("click", async () => {
   if (historyData.length === 0) { showToast("Nothing to delete", "error"); return; }
   if (!confirm("Delete ALL history? This cannot be undone.")) return;
-  saveHistory([]); historyData = [];
-  showToast("All history deleted", ""); render();
+  try {
+    await set(historyRef, null);
+    showToast("All history deleted", "");
+  } catch { showToast("Failed to delete", "error"); }
 });
 
 // ================= CSV HELPERS =================
@@ -154,7 +159,6 @@ function exportSingleCSV(session) {
   downloadCSV(csv, `${session.name}_session.csv`);
   showToast(`Exported ${session.name} ✓`, "success");
 }
-
 function downloadCSV(content, filename) {
   const blob = new Blob([content], { type: "text/csv" });
   const url  = URL.createObjectURL(blob);
@@ -162,6 +166,3 @@ function downloadCSV(content, filename) {
   a.href = url; a.download = filename; a.click();
   URL.revokeObjectURL(url);
 }
-
-// ================= INIT =================
-render();

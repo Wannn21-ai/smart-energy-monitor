@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Advanced — Smart Energy Monitor</title>
+  <meta name="firebase-api-key"             content="NETLIFY_ENV_FIREBASE_API_KEY"/>
+  <meta name="firebase-auth-domain"         content="NETLIFY_ENV_FIREBASE_AUTH_DOMAIN"/>
+  <meta name="firebase-database-url"        content="NETLIFY_ENV_FIREBASE_DATABASE_URL"/>
+  <meta name="firebase-project-id"          content="NETLIFY_ENV_FIREBASE_PROJECT_ID"/>
+  <meta name="firebase-storage-bucket"      content="NETLIFY_ENV_FIREBASE_STORAGE_BUCKET"/>
+  <meta name="firebase-messaging-sender-id" content="NETLIFY_ENV_FIREBASE_MESSAGING_SENDER_ID"/>
+  <meta name="firebase-app-id"              content="NETLIFY_ENV_FIREBASE_APP_ID"/>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <style>
+    /* ── Advanced page specific styles ── */
+    .adv-hero {
+      background: linear-gradient(135deg, rgba(0,229,255,0.06) 0%, rgba(0,230,118,0.04) 50%, rgba(255,171,0,0.04) 100%);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px;
+      margin-bottom: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+    .adv-hero::before {
+      content: '';
+      position: absolute;
+      top: -40px; right: -40px;
+      width: 200px; height: 200px;
+      background: radial-gradient(circle, rgba(0,229,255,0.08) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .adv-hero-title {
+      font-family: var(--font-display);
+      font-size: 11px; font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .adv-hero-sub {
+      font-size: 13px;
+      color: var(--text-secondary);
+      max-width: 500px;
+      line-height: 1.6;
+    }
+
+    /* ── Big metric cards ── */
+    .adv-metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .adv-metric {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      position: relative;
+      overflow: hidden;
+      transition: border-color var(--transition);
+    }
+    .adv-metric:hover { border-color: var(--border-accent); }
+    .adv-metric-accent {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+    }
+    .adv-metric-icon {
+      font-size: 20px;
+      margin-bottom: 14px;
+      display: block;
+    }
+    .adv-metric-label {
+      font-size: 11px; font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .adv-metric-value {
+      font-family: var(--font-display);
+      font-size: 36px; font-weight: 700;
+      color: var(--text-primary);
+      line-height: 1;
+      margin-bottom: 6px;
+    }
+    .adv-metric-unit {
+      font-family: var(--font-display);
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-left: 4px;
+    }
+    .adv-metric-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 10px;
+      line-height: 1.5;
+    }
+
+    /* ── PF Gauge bar ── */
+    .pf-bar-wrap {
+      margin-top: 12px;
+    }
+    .pf-bar-track {
+      width: 100%;
+      height: 6px;
+      background: var(--bg-elevated);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 4px;
+    }
+    .pf-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      background: linear-gradient(90deg, var(--red) 0%, var(--amber) 50%, var(--green) 100%);
+      transition: width 0.6s cubic-bezier(0.4,0,0.2,1);
+      width: 0%;
+    }
+    .pf-bar-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-muted);
+      font-family: var(--font-display);
+    }
+    .pf-quality {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-family: var(--font-display);
+      margin-top: 10px;
+    }
+
+    /* ── Frequency deviation indicator ── */
+    .freq-deviation {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .freq-deviation span {
+      font-family: var(--font-display);
+      font-weight: 700;
+    }
+
+    /* ── Formula cards ── */
+    .formula-section {
+      margin-bottom: 24px;
+    }
+    .formula-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+    .formula-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+    }
+    .formula-card-title {
+      font-family: var(--font-display);
+      font-size: 11px; font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .formula-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 0.5px solid var(--border);
+      gap: 12px;
+    }
+    .formula-row:last-child { border-bottom: none; }
+    .formula-name {
+      font-size: 12px;
+      color: var(--text-secondary);
+      flex: 1;
+    }
+    .formula-expr {
+      font-family: var(--font-display);
+      font-size: 11px;
+      color: var(--cyan);
+      background: var(--cyan-dim);
+      padding: 3px 8px;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+    .formula-result {
+      font-family: var(--font-display);
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-primary);
+      min-width: 70px;
+      text-align: right;
+    }
+
+    /* ── History log ── */
+    .log-section { margin-bottom: 24px; }
+    .log-table-wrap {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+    .log-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .log-table th {
+      padding: 12px 16px;
+      text-align: left;
+      font-family: var(--font-display);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      background: var(--bg-elevated);
+      border-bottom: 1px solid var(--border);
+    }
+    .log-table td {
+      padding: 10px 16px;
+      border-bottom: 0.5px solid var(--border);
+      color: var(--text-secondary);
+    }
+    .log-table tr:last-child td { border-bottom: none; }
+    .log-table tr:hover td { background: var(--bg-hover); }
+    .log-val {
+      font-family: var(--font-display);
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    .log-empty {
+      padding: 40px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    /* ── Charts ── */
+    .adv-chart-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    @media (max-width: 768px) {
+      .adv-chart-grid { grid-template-columns: 1fr; }
+      .adv-metric-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 480px) {
+      .adv-metric-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ── Live dot pulse ── */
+    .live-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--font-display);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--green);
+      background: var(--green-dim);
+      border: 1px solid rgba(0,230,118,0.3);
+      padding: 3px 10px;
+      border-radius: 20px;
+    }
+    .live-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: live-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes live-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.8); }
+    }
+  </style>
+</head>
+<body>
+<div class="app-layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main-content" id="main-content">
+    <header class="topbar" id="topbar"></header>
+    <div class="page-content">
+
+      <!-- PAGE HEADER -->
+      <div class="page-header">
+        <div>
+          <div class="page-header-title">Advanced Readings</div>
+          <div class="page-header-sub">Technical data for engineers & enthusiasts</div>
+        </div>
+        <div class="live-badge">
+          <div class="live-dot"></div>
+          LIVE
+        </div>
+      </div>
+
+      <!-- HERO INFO -->
+      <div class="adv-hero">
+        <div class="adv-hero-title">⚠ Technical Reference</div>
+        <div class="adv-hero-sub">
+          Data on this page is intended for technical analysis. Power Factor and Frequency readings
+          require an active device to be meaningful. The dashboard shows simplified data
+          suitable for everyday use.
+        </div>
+      </div>
+
+      <!-- METRIC CARDS -->
+      <div class="adv-metric-grid">
+
+        <!-- Power Factor -->
+        <div class="adv-metric">
+          <div class="adv-metric-accent" style="background: linear-gradient(90deg, var(--red), var(--amber), var(--green));"></div>
+          <span class="adv-metric-icon">⚡</span>
+          <div class="adv-metric-label">Power Factor</div>
+          <div>
+            <span class="adv-metric-value" id="adv-pf">—</span>
+            <span class="adv-metric-unit"></span>
+          </div>
+          <div class="pf-bar-wrap">
+            <div class="pf-bar-track">
+              <div class="pf-bar-fill" id="pf-bar"></div>
+            </div>
+            <div class="pf-bar-labels"><span>0 (Poor)</span><span>0.5</span><span>1.0 (Ideal)</span></div>
+          </div>
+          <div class="pf-quality" id="pf-quality" style="background:var(--bg-elevated);color:var(--text-muted);">
+            ● Waiting for data
+          </div>
+          <div class="adv-metric-desc">
+            Ratio of active power (W) to apparent power (VA).
+            Closer to 1.0 = more efficient. Most home appliances: 0.7–0.95.
+          </div>
+        </div>
+
+        <!-- Frequency -->
+        <div class="adv-metric">
+          <div class="adv-metric-accent" style="background: var(--cyan);"></div>
+          <span class="adv-metric-icon">〜</span>
+          <div class="adv-metric-label">Grid Frequency</div>
+          <div>
+            <span class="adv-metric-value" id="adv-freq">—</span>
+            <span class="adv-metric-unit">Hz</span>
+          </div>
+          <div class="freq-deviation" id="freq-deviation">
+            Standard: 50 Hz (Indonesia PLN)
+          </div>
+          <div class="adv-metric-desc">
+            AC grid frequency from PLN. Normal range: 49.5–50.5 Hz.
+            Deviation may indicate grid instability or heavy load conditions.
+          </div>
+        </div>
+
+        <!-- Apparent Power -->
+        <div class="adv-metric">
+          <div class="adv-metric-accent" style="background: var(--amber);"></div>
+          <span class="adv-metric-icon">◈</span>
+          <div class="adv-metric-label">Apparent Power</div>
+          <div>
+            <span class="adv-metric-value" id="adv-apparent">—</span>
+            <span class="adv-metric-unit">VA</span>
+          </div>
+          <div class="adv-metric-desc">
+            Total power drawn from the grid (V × I).
+            Includes both active (useful) and reactive (wasted) power.
+            Always ≥ active power (W).
+          </div>
+        </div>
+
+        <!-- Reactive Power (calculated) -->
+        <div class="adv-metric">
+          <div class="adv-metric-accent" style="background: var(--green);"></div>
+          <span class="adv-metric-icon">∿</span>
+          <div class="adv-metric-label">Reactive Power</div>
+          <div>
+            <span class="adv-metric-value" id="adv-reactive">—</span>
+            <span class="adv-metric-unit">VAR</span>
+          </div>
+          <div class="adv-metric-desc">
+            Calculated: √(VA² − W²). Power that oscillates between source
+            and load without doing useful work. Caused by inductive/capacitive loads.
+          </div>
+        </div>
+      </div>
+
+      <!-- FORMULA REFERENCE -->
+      <div class="formula-section">
+        <div class="chart-card">
+          <div class="chart-card-title" style="margin-bottom:16px;">Live Calculation Reference</div>
+          <div class="formula-grid">
+
+            <div class="formula-card">
+              <div class="formula-card-title">Power</div>
+              <div class="formula-row">
+                <span class="formula-name">Active Power (W)</span>
+                <span class="formula-expr">PZEM.power()</span>
+                <span class="formula-result" id="fr-power">—</span>
+              </div>
+              <div class="formula-row">
+                <span class="formula-name">Apparent Power (VA)</span>
+                <span class="formula-expr">V × I</span>
+                <span class="formula-result" id="fr-apparent">—</span>
+              </div>
+              <div class="formula-row">
+                <span class="formula-name">Reactive Power (VAR)</span>
+                <span class="formula-expr">√(VA²−W²)</span>
+                <span class="formula-result" id="fr-reactive">—</span>
+              </div>
+              <div class="formula-row">
+                <span class="formula-name">Power Factor</span>
+                <span class="formula-expr">W ÷ VA</span>
+                <span class="formula-result" id="fr-pf">—</span>
+              </div>
+            </div>
+
+            <div class="formula-card">
+              <div class="formula-card-title">Energy & Cost</div>
+              <div class="formula-row">
+                <span class="formula-name">Session Energy (Wh)</span>
+                <span class="formula-expr">P × T(h)</span>
+                <span class="formula-result" id="fr-wh">—</span>
+              </div>
+              <div class="formula-row">
+                <span class="formula-name">Session Energy (kWh)</span>
+                <span class="formula-expr">Wh ÷ 1000</span>
+                <span class="formula-result" id="fr-kwh">—</span>
+              </div>
+              <div class="formula-row">
+                <span class="formula-name">Estimated Cost</span>
+                <span class="formula-expr">kWh × tariff</span>
+                <span class="formula-result" id="fr-cost">—</span>
+              </div>
+              <div class="formula-row">
+                <span class="formula-name">Tariff used</span>
+                <span class="formula-expr">settings</span>
+                <span class="formula-result" id="fr-tariff">—</span>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- LIVE CHARTS -->
+      <div class="adv-chart-grid">
+        <div class="chart-card">
+          <div class="chart-card-title">Power Factor over time</div>
+          <div style="position:relative;height:200px;">
+            <canvas id="chart-pf"></canvas>
+          </div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-title">Frequency over time</div>
+          <div style="position:relative;height:200px;">
+            <canvas id="chart-freq"></canvas>
+          </div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-title">Active vs Apparent Power</div>
+          <div style="position:relative;height:200px;">
+            <canvas id="chart-power-compare"></canvas>
+          </div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-title">Reactive Power over time</div>
+          <div style="position:relative;height:200px;">
+            <canvas id="chart-reactive"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- READING LOG TABLE -->
+      <div class="log-section">
+        <div class="log-table-wrap">
+          <table class="log-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>V (V)</th>
+                <th>I (A)</th>
+                <th>P Active (W)</th>
+                <th>S Apparent (VA)</th>
+                <th>Q Reactive (VAR)</th>
+                <th>PF</th>
+                <th>Hz</th>
+              </tr>
+            </thead>
+            <tbody id="log-tbody">
+              <tr><td colspan="8" class="log-empty">Waiting for live data...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:10px;gap:10px;">
+          <button class="btn btn-ghost" id="btn-clear-log">✕ Clear Log</button>
+          <button class="btn btn-ghost" id="btn-export-log">↓ Export CSV</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script type="module">
+import { requireAuth, renderShell, fillUserInfo, startStatusWatcher, applyTheme } from "./js/auth-guard.js";
+import { db, ref, onValue } from "./js/firebase-config.js";
+
+const user = await requireAuth();
+renderShell("advanced", "ADVANCED");
+fillUserInfo(user);
+startStatusWatcher();
+const uid = user.uid;
+
+// Apply saved theme
+const savedTheme = localStorage.getItem(`sem_theme_${uid}`);
+if (savedTheme) applyTheme(savedTheme);
+
+// Load settings for tariff
+const SETTING_DEFAULTS = { currency: "IDR", tariff: 1444.70 };
+let settings = { ...SETTING_DEFAULTS };
+try {
+  const saved = JSON.parse(localStorage.getItem(`sem_settings_${uid}`));
+  if (saved) settings = { ...SETTING_DEFAULTS, ...saved };
+} catch {}
+
+const formatCost = v => settings.currency === "USD"
+  ? `$ ${v.toFixed(2)}`
+  : `Rp ${Math.round(v).toLocaleString("id-ID")}`;
+
+// ── State ──
+let logData = []; // array of readings for log table & CSV export
+const MAX_LOG  = 50;
+const MAX_CHART = 30;
+
+// ── Chart helpers ──
+function tickColor()  { return getComputedStyle(document.documentElement).getPropertyValue("--chart-tick").trim()  || "#666"; }
+function gridColor()  { return getComputedStyle(document.documentElement).getPropertyValue("--chart-grid").trim()  || "rgba(255,255,255,0.04)"; }
+
+function makeOpts(yMin, yMax, suggestedMax) {
+  return {
+    responsive: true, maintainAspectRatio: false, animation: { duration: 300 },
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: tickColor(), font: { size: 9 }, maxTicksLimit: 6 }, grid: { color: gridColor() } },
+      y: {
+        ticks: { color: tickColor(), font: { size: 9 } }, grid: { color: gridColor() },
+        ...(yMin !== undefined ? { min: yMin } : {}),
+        ...(yMax !== undefined ? { max: yMax } : {}),
+        ...(suggestedMax !== undefined ? { suggestedMax } : {})
+      }
+    }
+  };
+}
+
+const chartPF = new Chart(document.getElementById("chart-pf"), {
+  type: "line",
+  data: { labels: [], datasets: [{ label: "PF", data: [],
+    borderColor: "#00e5ff", backgroundColor: "rgba(0,229,255,0.06)",
+    tension: 0.4, fill: true, pointRadius: 2, pointBackgroundColor: "#00e5ff" }] },
+  options: makeOpts(0, 1.05)
+});
+const chartFreq = new Chart(document.getElementById("chart-freq"), {
+  type: "line",
+  data: { labels: [], datasets: [{ label: "Hz", data: [],
+    borderColor: "#00e676", backgroundColor: "rgba(0,230,118,0.06)",
+    tension: 0.4, fill: true, pointRadius: 2, pointBackgroundColor: "#00e676" }] },
+  options: makeOpts(48, 52)
+});
+const chartPowerCompare = new Chart(document.getElementById("chart-power-compare"), {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label: "Active (W)", data: [],
+      borderColor: "#ffab00", backgroundColor: "rgba(255,171,0,0.06)",
+      tension: 0.4, fill: false, pointRadius: 2, pointBackgroundColor: "#ffab00" },
+    { label: "Apparent (VA)", data: [],
+      borderColor: "rgba(255,171,0,0.4)", backgroundColor: "transparent",
+      tension: 0.4, fill: false, borderDash: [4,3], pointRadius: 2 }
+  ]},
+  options: { ...makeOpts(0, undefined, 100), plugins: { legend: {
+    display: true, position: "bottom",
+    labels: { color: tickColor(), font: { size: 10 }, boxWidth: 10, padding: 10 }
+  }}}
+});
+const chartReactive = new Chart(document.getElementById("chart-reactive"), {
+  type: "line",
+  data: { labels: [], datasets: [{ label: "VAR", data: [],
+    borderColor: "#00e676", backgroundColor: "rgba(0,230,118,0.06)",
+    tension: 0.4, fill: true, pointRadius: 2, pointBackgroundColor: "#00e676" }] },
+  options: makeOpts(0, undefined, 50)
+});
+
+// ── PF quality helper ──
+function pfQuality(pf) {
+  if (pf <= 0)      return { label: "No Device",  style: "background:var(--bg-elevated);color:var(--text-muted);" };
+  if (pf >= 0.95)   return { label: "Excellent ✓", style: "background:var(--green-dim);color:var(--green);border:1px solid rgba(0,230,118,0.3);" };
+  if (pf >= 0.85)   return { label: "Good",        style: "background:rgba(0,229,255,0.1);color:var(--cyan);border:1px solid rgba(0,229,255,0.3);" };
+  if (pf >= 0.70)   return { label: "Fair",        style: "background:var(--amber-dim);color:var(--amber);border:1px solid rgba(255,171,0,0.3);" };
+  return              { label: "Poor ⚠",  style: "background:var(--red-dim);color:var(--red);border:1px solid rgba(255,23,68,0.3);" };
+}
+
+// ── Frequency deviation helper ──
+function freqStatus(freq) {
+  if (freq <= 0) return { text: "Standard: 50 Hz (Indonesia PLN)", color: "var(--text-muted)" };
+  const dev = (freq - 50).toFixed(2);
+  const abs = Math.abs(freq - 50);
+  if (abs <= 0.2)  return { text: `${freq.toFixed(1)} Hz — Normal (deviation: ${dev > 0 ? "+" : ""}${dev} Hz)`, color: "var(--green)" };
+  if (abs <= 0.5)  return { text: `${freq.toFixed(1)} Hz — Acceptable (deviation: ${dev > 0 ? "+" : ""}${dev} Hz)`, color: "var(--amber)" };
+  return                  { text: `${freq.toFixed(1)} Hz — Out of range! (deviation: ${dev > 0 ? "+" : ""}${dev} Hz)`, color: "var(--red)" };
+}
+
+// ── Push to chart helper ──
+function pushChart(chart, label, ...values) {
+  chart.data.labels.push(label);
+  values.forEach((v, i) => chart.data.datasets[i].data.push(v));
+  if (chart.data.labels.length > MAX_CHART) {
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(d => d.data.shift());
+  }
+  chart.update();
+}
+
+// ── Update log table ──
+function renderLog() {
+  const tbody = document.getElementById("log-tbody");
+  if (logData.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="8" class="log-empty">Waiting for live data...</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = logData.slice().reverse().map(r => `
+    <tr>
+      <td>${r.time}</td>
+      <td><span class="log-val">${r.voltage.toFixed(1)}</span></td>
+      <td><span class="log-val">${r.current.toFixed(2)}</span></td>
+      <td><span class="log-val" style="color:var(--amber)">${r.power.toFixed(1)}</span></td>
+      <td><span class="log-val">${r.apparent.toFixed(1)}</span></td>
+      <td><span class="log-val" style="color:var(--green)">${r.reactive.toFixed(1)}</span></td>
+      <td><span class="log-val" style="color:var(--cyan)">${r.pf.toFixed(2)}</span></td>
+      <td><span class="log-val">${r.frequency.toFixed(1)}</span></td>
+    </tr>`).join("");
+}
+
+// ── Firebase listener ──
+let lastTimestamp = 0;
+onValue(ref(db, "live"), snapshot => {
+  const data = snapshot.val();
+  if (!data) return;
+
+  const sys = data.system || {};
+  const dev = data.device || {};
+  const ts  = sys.timestamp || 0;
+
+  // Only process new data
+  if (ts <= lastTimestamp && ts !== 0) return;
+  lastTimestamp = ts;
+
+  const voltage  = dev.voltage   || 0;
+  const current  = dev.current   || 0;
+  const power    = dev.power     || 0;
+  const apparent = dev.apparent  || (voltage * current);
+  const pf       = dev.pf        || 0;
+  const freq     = dev.frequency || 0;
+  const energy   = dev.energy    || 0;
+  const cost     = dev.cost      || 0;
+
+  // Reactive power: Q = √(S² - P²)
+  const reactive = apparent > power
+    ? Math.sqrt(Math.max(0, apparent * apparent - power * power))
+    : 0;
+
+  // ── Update big metrics ──
+  document.getElementById("adv-pf").textContent       = pf > 0 ? pf.toFixed(2) : "—";
+  document.getElementById("adv-freq").textContent     = freq > 0 ? freq.toFixed(1) : "—";
+  document.getElementById("adv-apparent").textContent = apparent > 0 ? apparent.toFixed(0) : "—";
+  document.getElementById("adv-reactive").textContent = reactive > 0 ? reactive.toFixed(1) : "—";
+
+  // PF bar & quality
+  const pfPct = pf * 100;
+  document.getElementById("pf-bar").style.width = `${pfPct}%`;
+  const q = pfQuality(pf);
+  const qEl = document.getElementById("pf-quality");
+  qEl.textContent = `● ${q.label}`;
+  qEl.setAttribute("style", q.style + "display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;font-family:var(--font-display);margin-top:10px;");
+
+  // Frequency deviation
+  const fs = freqStatus(freq);
+  const fdEl = document.getElementById("freq-deviation");
+  fdEl.innerHTML = `<span style="color:${fs.color}">${fs.text}</span>`;
+
+  // ── Formula reference ──
+  const tariffRaw = settings.tariff;
+  document.getElementById("fr-power").textContent    = power > 0 ? `${power.toFixed(1)} W` : "—";
+  document.getElementById("fr-apparent").textContent = apparent > 0 ? `${apparent.toFixed(1)} VA` : "—";
+  document.getElementById("fr-reactive").textContent = reactive > 0 ? `${reactive.toFixed(1)} VAR` : "—";
+  document.getElementById("fr-pf").textContent       = pf > 0 ? pf.toFixed(2) : "—";
+  document.getElementById("fr-wh").textContent       = energy > 0 ? `${(energy * 1000).toFixed(2)} Wh` : "—";
+  document.getElementById("fr-kwh").textContent      = energy > 0 ? `${energy.toFixed(4)} kWh` : "—";
+  document.getElementById("fr-cost").textContent     = cost > 0 ? formatCost(cost) : "—";
+  document.getElementById("fr-tariff").textContent   = `Rp ${tariffRaw.toLocaleString("id-ID")}`;
+
+  // Only log & chart when device is actually connected
+  if (current < 0.01 || power < 0.5) return;
+
+  const timeLabel = new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  // ── Push to charts ──
+  pushChart(chartPF,           timeLabel, pf);
+  pushChart(chartFreq,         timeLabel, freq);
+  pushChart(chartPowerCompare, timeLabel, power, apparent);
+  pushChart(chartReactive,     timeLabel, reactive);
+
+  // ── Log table ──
+  logData.push({ time: timeLabel, voltage, current, power, apparent, reactive, pf, frequency: freq });
+  if (logData.length > MAX_LOG) logData.shift();
+  renderLog();
+});
+
+// ── Clear & Export log ──
+document.getElementById("btn-clear-log").addEventListener("click", () => {
+  logData = [];
+  renderLog();
+  [chartPF, chartFreq, chartPowerCompare, chartReactive].forEach(c => {
+    c.data.labels = [];
+    c.data.datasets.forEach(d => d.data = []);
+    c.update();
+  });
+});
+
+document.getElementById("btn-export-log").addEventListener("click", () => {
+  if (logData.length === 0) return;
+  let csv = "Time,Voltage(V),Current(A),Active Power(W),Apparent Power(VA),Reactive Power(VAR),Power Factor,Frequency(Hz)\n";
+  logData.forEach(r => {
+    csv += `${r.time},${r.voltage.toFixed(1)},${r.current.toFixed(2)},${r.power.toFixed(1)},${r.apparent.toFixed(1)},${r.reactive.toFixed(1)},${r.pf.toFixed(2)},${r.frequency.toFixed(1)}\n`;
+  });
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = "sem_advanced_log.csv"; a.click();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>

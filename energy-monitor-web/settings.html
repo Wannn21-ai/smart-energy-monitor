@@ -4,15 +4,13 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Settings — Smart Energy Monitor</title>
-
-  <meta name="firebase-api-key"            content="NETLIFY_ENV_FIREBASE_API_KEY"/>
-  <meta name="firebase-auth-domain"        content="NETLIFY_ENV_FIREBASE_AUTH_DOMAIN"/>
-  <meta name="firebase-database-url"       content="NETLIFY_ENV_FIREBASE_DATABASE_URL"/>
-  <meta name="firebase-project-id"         content="NETLIFY_ENV_FIREBASE_PROJECT_ID"/>
-  <meta name="firebase-storage-bucket"     content="NETLIFY_ENV_FIREBASE_STORAGE_BUCKET"/>
+  <meta name="firebase-api-key"             content="NETLIFY_ENV_FIREBASE_API_KEY"/>
+  <meta name="firebase-auth-domain"         content="NETLIFY_ENV_FIREBASE_AUTH_DOMAIN"/>
+  <meta name="firebase-database-url"        content="NETLIFY_ENV_FIREBASE_DATABASE_URL"/>
+  <meta name="firebase-project-id"          content="NETLIFY_ENV_FIREBASE_PROJECT_ID"/>
+  <meta name="firebase-storage-bucket"      content="NETLIFY_ENV_FIREBASE_STORAGE_BUCKET"/>
   <meta name="firebase-messaging-sender-id" content="NETLIFY_ENV_FIREBASE_MESSAGING_SENDER_ID"/>
-  <meta name="firebase-app-id"             content="NETLIFY_ENV_FIREBASE_APP_ID"/>
-
+  <meta name="firebase-app-id"              content="NETLIFY_ENV_FIREBASE_APP_ID"/>
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
 </head>
@@ -29,7 +27,8 @@
           </div>
         </div>
         <div class="settings-grid">
-          <!-- ① Energy Pricing -->
+
+          <!-- ① Energy Pricing + Overload Threshold -->
           <div class="settings-card">
             <div class="settings-card-title" id="txt-pricing-title">💰 Energy Pricing</div>
             <div class="form-group">
@@ -44,10 +43,20 @@
               <input type="number" id="tariff" class="form-input" placeholder="1444.70" step="0.01"/>
             </div>
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;" id="tariff-converted"></div>
+            <div class="divider" style="margin:4px 0 16px;"></div>
+            <div class="form-group">
+              <label class="form-label" id="txt-threshold-label">Overload Threshold (Watt)</label>
+              <input type="number" id="overload-threshold" class="form-input"
+                placeholder="2000" step="100" min="100" max="10000"/>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:6px;" id="txt-threshold-sub">
+                Alert when device power exceeds this value
+              </div>
+            </div>
             <button class="btn btn-primary" id="btn-save-settings" style="width:100%;justify-content:center;">
               <span id="txt-save-pricing">Save Settings</span>
             </button>
           </div>
+
           <!-- ② Account -->
           <div class="settings-card">
             <div class="settings-card-title" id="txt-account-title">👤 Account</div>
@@ -57,12 +66,14 @@
             </div>
             <div class="form-group">
               <label class="form-label" id="txt-email-label">Email</label>
-              <input type="email" id="display-email" class="form-input" disabled style="opacity:0.5;cursor:not-allowed;"/>
+              <input type="email" id="display-email" class="form-input" disabled
+                style="opacity:0.5;cursor:not-allowed;"/>
             </div>
             <button class="btn btn-primary" id="btn-save-profile" style="width:100%;justify-content:center;">
               <span id="txt-save-profile">Update Profile</span>
             </button>
           </div>
+
           <!-- ③ Appearance -->
           <div class="settings-card">
             <div class="settings-card-title" id="txt-appearance-title">🎨 Appearance</div>
@@ -94,6 +105,7 @@
               <span id="txt-save-appearance">Save Appearance</span>
             </button>
           </div>
+
           <!-- ④ Notifications & Dashboard -->
           <div class="settings-card">
             <div class="settings-card-title" id="txt-notif-title">🔔 Notifications & Dashboard</div>
@@ -127,6 +139,17 @@
                 <span class="toggle-slider"></span>
               </label>
             </div>
+            <!-- NEW: Overload notification toggle -->
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-label" id="txt-notif-overload">Overload notification</div>
+                <div class="toggle-sub" id="txt-notif-overload-sub">Show alert when power exceeds threshold</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="notif-overload" checked/>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
             <div class="divider" style="margin:16px 0;"></div>
             <div class="form-group">
               <label class="form-label" id="txt-refresh-label">Dashboard refresh interval</label>
@@ -140,11 +163,12 @@
               <span id="txt-save-notif">Save Preferences</span>
             </button>
           </div>
+
           <!-- ⑤ Data Control -->
           <div class="settings-card">
             <div class="settings-card-title" id="txt-data-title">📊 Data Control</div>
             <p style="font-size:13px;color:var(--text-muted);margin-bottom:20px;" id="txt-data-sub">
-              Export or delete all monitoring history data stored on this device.
+              History and settings are synced to your account across all devices.
             </p>
             <div style="display:flex;flex-direction:column;gap:12px;">
               <button class="btn btn-ghost" id="btn-export-all" style="justify-content:center;">
@@ -155,6 +179,7 @@
               </button>
             </div>
           </div>
+
           <!-- ⑥ About -->
           <div class="settings-card">
             <div class="settings-card-title" id="txt-about-title">ℹ About</div>
@@ -165,7 +190,7 @@
               </div>
               <div style="display:flex;justify-content:space-between;font-size:13px;">
                 <span style="color:var(--text-muted);" id="txt-about-ver">Version</span>
-                <span style="color:var(--text-secondary);font-family:var(--font-display);">2.0.0</span>
+                <span style="color:var(--text-secondary);font-family:var(--font-display);">3.0.0</span>
               </div>
               <div style="display:flex;justify-content:space-between;font-size:13px;">
                 <span style="color:var(--text-muted);" id="txt-about-hw">Hardware</span>
@@ -177,6 +202,7 @@
               </div>
             </div>
           </div>
+
         </div>
       </div>
     </div>
