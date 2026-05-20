@@ -16,7 +16,6 @@
 // Firebase — ganti dengan project baru kamu
 const char* FIREBASE_HOST = "https://smart-energy-monitor-v2-de79d-default-rtdb.asia-southeast1.firebasedatabase.app";
 const char* FIREBASE_PATH = "/live.json";
-//const char* FIREBASE_AUTH = ""; // Firebase → Project Settings → Service Accounts → Database secret
 
 // ================= OLED =================
 #define SCREEN_WIDTH  128
