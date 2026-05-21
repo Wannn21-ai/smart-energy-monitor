@@ -248,7 +248,7 @@ async function updateSessionCount() {
 function setOverloadBanner(active) {
   if (!overloadBanner) return;
   overloadBanner.style.display = active ? "flex" : "none";
-  if (active) overloadBanner.textContent = `⚠ OVERLOAD DETECTED — Power exceeds ${firebaseThreshold}W threshold!`;
+  if (active) overloadBanner.textContent = `⚠ OVERLOAD DETECTED — Power exceeds ${settings.overloadThreshold}W threshold!`;
 }
 
 // ================= DEVICE TABS =================
@@ -413,13 +413,14 @@ onValue(ref(db, "live"), snapshot => {
 function updateMeters() {
   const now  = Math.floor(Date.now() / 1000);
   const diff = now - firebaseTimestamp;
-
-  // FIX: systemOnline hanya butuh internet=true dan timestamp fresh (≤120 detik)
   systemOnline = systemInternet && firebaseTimestamp > 0 && diff <= 120;
-
-  // FIX: deviceOnline = systemOnline + ada arus & daya
-  // Nilai current & firebasePower sudah diupdate oleh onValue di atas
   deviceOnline = systemOnline && current > 0.01 && firebasePower > 0.5;
+
+  // ✅ FIX: cek overload dari sisi web, tidak bergantung ESP32
+  const effectiveThreshold = settings.overloadThreshold || 2000;
+  const webOverload = deviceOnline && 
+  firebasePower > 0 && 
+  firebasePower >= settings.overloadThreshold;
 
   setSystemStatus(systemOnline);
   subWebStatus.textContent = `Web: ${systemOnline ? "online" : "offline"}`;
@@ -445,18 +446,18 @@ function updateMeters() {
   prevDeviceConnected = deviceOnline;
 
   // Overload
-  if (firebaseOverload && !prevOverload) {
+  if (webOverload && !prevOverload) {
     if (settings.notifOverload)
-      showToast(`⚠ OVERLOAD! Daya melebihi ${firebaseThreshold}W`, "error");
+      showToast(`⚠ OVERLOAD! Daya melebihi ${effectiveThreshold}W`, "error");
     setDeviceBadge("overload");
     setOverloadBanner(true);
   }
-  if (!firebaseOverload && prevOverload) {
+  if (!webOverload && prevOverload) {
     if (isRunning && deviceOnline) setDeviceBadge("connected");
     setOverloadBanner(false);
     showToast("✓ Overload teratasi", "success");
   }
-  prevOverload = firebaseOverload;
+  prevOverload = webOverload;
 
   if (!activeDevice) { clearDisplay(); setDeviceBadge("idle"); return; }
   if (!systemOnline) { setDeviceBadge("unknown"); clearDisplay(); return; }
