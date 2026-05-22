@@ -1,4 +1,7 @@
-import { requireAuth, renderShell, fillUserInfo, showToast, startStatusWatcher } from "./auth-guard.js";
+import {
+  requireAuth, renderShell, fillUserInfo, showToast,
+  startStatusWatcher, loadAndApplySettings
+} from "./auth-guard.js";
 import { db, ref, get } from "./firebase-config.js";
 
 const user = await requireAuth();
@@ -7,7 +10,9 @@ fillUserInfo(user);
 startStatusWatcher();
 const uid = user.uid;
 
-// Ambil key yang disimpan oleh history.js
+// Load dan apply theme + language dari Firebase/localStorage
+await loadAndApplySettings(uid);
+
 const selectedKey = sessionStorage.getItem(`sem_selected_key_${uid}`);
 
 const detailGrid  = document.getElementById("detail-grid");
@@ -30,11 +35,11 @@ if (!selectedKey) {
       nameEl.textContent = session.name;
       dateEl.textContent = `Recorded on ${session.date}`;
       const fields = [
-        { label: "Duration",        value: session.duration,  accent: "var(--cyan)"  },
-        { label: "Power",           value: `${session.power} W`, accent: "var(--amber)" },
+        { label: "Duration",        value: session.duration,      accent: "var(--cyan)"  },
+        { label: "Power",           value: `${session.power} W`,  accent: "var(--amber)" },
         { label: "Energy",          value: `${session.energy} kWh`, accent: "var(--green)" },
-        { label: "Estimated Cost",  value: session.cost,      accent: "var(--cyan)"  },
-        { label: "Date",            value: session.date,      accent: ""             },
+        { label: "Estimated Cost",  value: session.cost,          accent: "var(--cyan)"  },
+        { label: "Date",            value: session.date,          accent: ""             },
       ];
       fields.forEach(f => {
         const item = document.createElement("div");

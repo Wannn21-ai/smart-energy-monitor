@@ -1,6 +1,7 @@
 import {
   requireAuth, renderShell, fillUserInfo, setSystemStatus,
-  showToast, applyTheme, updateChartColors, startStatusWatcher
+  showToast, applyTheme, updateChartColors, startStatusWatcher,
+  loadAndApplySettings
 } from "./auth-guard.js";
 import { db, ref, onValue, set, push, get } from "./firebase-config.js";
 
@@ -20,48 +21,35 @@ const activeRef   = ref(db, `users/${uid}/activeSession`);
 const SETTING_DEFAULTS = {
   currency: "IDR", tariff: 1444.70, overloadThreshold: 2000,
   notifDevice: true, notifDisconnect: true, notifSession: true,
-  notifOverload: true, refreshInterval: 3000
+  notifOverload: true, refreshInterval: 3000, theme: "dark", language: "en"
 };
 let settings = { ...SETTING_DEFAULTS };
 
-async function loadSettings() {
-  // localStorage sebagai cache instant
-  try {
-    const cached = JSON.parse(localStorage.getItem(`sem_settings_${uid}`));
-    if (cached) settings = { ...SETTING_DEFAULTS, ...cached };
-  } catch {}
-  // Firebase sebagai sumber kebenaran
+// loadAndApplySettings dari auth-guard sudah handle theme + language + Firebase sync
+settings = await loadAndApplySettings(uid);
+
+// Re-sync settings setiap 10 detik (settings bisa berubah dari device lain)
+setInterval(async () => {
   try {
     const snap = await get(settingsRef);
     if (snap.exists()) {
-      settings = { ...SETTING_DEFAULTS, ...snap.val() };
-      localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+      const remote = { ...SETTING_DEFAULTS, ...snap.val() };
+      const changed = JSON.stringify(remote) !== JSON.stringify(settings);
+      if (changed) {
+        settings = remote;
+        localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+        applyTheme(settings.theme);
+        startMetersInterval(); // restart jika refreshInterval berubah
+      }
     }
   } catch {}
-  // Re-sync setiap 10 detik (settings bisa berubah dari device lain)
-  setInterval(async () => {
-    try {
-      const snap = await get(settingsRef);
-      if (snap.exists()) {
-        const remote = { ...SETTING_DEFAULTS, ...snap.val() };
-        if (JSON.stringify(remote) !== JSON.stringify(settings)) {
-          settings = remote;
-          localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
-          startMetersInterval(); // restart jika refreshInterval berubah
-        }
-      }
-    } catch {}
-  }, 10000);
-}
-
-const savedTheme = localStorage.getItem(`sem_theme_${uid}`);
-if (savedTheme) applyTheme(savedTheme);
+}, 10000);
 
 // ================= STATE =================
 let voltage = 0, current = 0, firebasePower = 0, firebaseTimestamp = 0;
 let firebasePF = 0, firebaseFreq = 0, firebaseApparent = 0;
 let firebaseEnergy = 0, firebaseCost = 0;
-let firebaseOverload = false, firebaseThreshold = 2000;
+let firebaseOverload = false;
 let systemInternet = false, systemOnline = false, deviceOnline = false;
 let prevDeviceConnected = false, prevOverload = false;
 let isRunning = false, startTime = null, timerInterval = null;
@@ -120,8 +108,6 @@ const deviceTabsEl    = document.getElementById("device-tabs");
 const btnStop         = document.getElementById("btn-stop");
 const fab             = document.getElementById("fab-add");
 const modalAdd        = document.getElementById("modal-add-device");
-const modalTitle      = document.querySelector("#modal-add-device .modal-title");
-const modalSub        = document.querySelector("#modal-add-device .modal-sub");
 const inputDevName    = document.getElementById("input-device-name");
 const btnCancelDev    = document.getElementById("btn-cancel-device");
 const btnSaveDev      = document.getElementById("btn-save-device");
@@ -214,6 +200,7 @@ function updateDisplay() {
 }
 function updateTimer() {
   if (!startTime) return;
+  // startTime adalah kapan device PERTAMA terdeteksi (bukan kapan user input nama)
   const d = Date.now() - startTime;
   const h = String(Math.floor(d / 3600000)).padStart(2, "0");
   const m = String(Math.floor((d % 3600000) / 60000)).padStart(2, "0");
@@ -302,12 +289,24 @@ async function resetMonitoring() {
   renderDeviceTabs();
 }
 
-// ================= START =================
+// ================================================================
+// START MONITORING
+// BUG FIX #6: startTime & energyBaseline diset ke SAAT DEVICE
+// PERTAMA TERDETEKSI (deviceConnectTime), bukan saat user input nama.
+// Jadi kalau user telat 1 menit, waktu + energi tetap akurat.
+// ================================================================
+let deviceConnectTime   = null; // kapan device pertama terdeteksi
+let deviceConnectEnergy = 0;    // energyBaseline saat device pertama terdeteksi
+
 async function startMonitoring(name) {
-  activeDevice   = { id: `dev_${Date.now()}`, name };
-  energyBaseline = firebaseEnergy;
-  startTime      = Date.now();
-  isRunning      = true; sessionSaved = false;
+  activeDevice = { id: `dev_${Date.now()}`, name };
+
+  // Gunakan waktu & energi saat device PERTAMA TERDETEKSI
+  // (bukan saat user submit nama)
+  startTime      = deviceConnectTime   || Date.now();
+  energyBaseline = deviceConnectEnergy !== undefined ? deviceConnectEnergy : firebaseEnergy;
+
+  isRunning = true; sessionSaved = false;
   await saveActiveSession({ ...activeDevice, startTime, energyBaseline });
   valDeviceName.textContent  = name;
   activeDevLabel.textContent = `Monitoring: ${name}`;
@@ -316,7 +315,15 @@ async function startMonitoring(name) {
   clearInterval(timerInterval);
   timerInterval = setInterval(updateTimer, 1000);
   renderDeviceTabs();
-  showToast(`Monitoring "${name}" dimulai ▶`, "success");
+
+  // Hitung berapa lama device sudah terhubung sebelum user input nama
+  const retroMs = Date.now() - startTime;
+  const retroMin = Math.round(retroMs / 60000);
+  if (retroMin >= 1) {
+    showToast(`Monitoring "${name}" dimulai ▶ (sudah ${retroMin} mnt terhitung)`, "success");
+  } else {
+    showToast(`Monitoring "${name}" dimulai ▶`, "success");
+  }
 }
 
 // ================= CHART UPDATE =================
@@ -337,33 +344,53 @@ async function updateBarPie() {
 }
 
 // ================= MODAL =================
+// Timer untuk notifikasi "sudah X menit menunggu nama"
+let namingReminderTimeout = null;
+
 async function openModalAuto() {
   waitingForName = true;
-  // Nama unik dari history yang sudah ada
   const history   = await getHistory();
   const usedNames = history.map(h => h.name);
-  modalTitle.textContent = "⚡ Device Terdeteksi!";
-  modalSub.textContent   = "Berikan nama untuk device yang baru terhubung.";
+  const modalTitleEl = document.querySelector("#modal-add-device .modal-title");
+  const modalSubEl   = document.querySelector("#modal-add-device .modal-sub");
+  if (modalTitleEl) modalTitleEl.textContent = "⚡ Device Terdeteksi!";
+  if (modalSubEl)   modalSubEl.textContent   = "Berikan nama untuk device yang baru terhubung.";
   inputDevName.value     = "";
   inputDevName.dataset.usedNames = JSON.stringify(usedNames);
   modalAdd.classList.add("open");
   setTimeout(() => inputDevName.focus(), 100);
+
+  // Reminder setelah 30 detik jika user belum input nama
+  clearTimeout(namingReminderTimeout);
+  namingReminderTimeout = setTimeout(() => {
+    if (waitingForName) {
+      const elapsed = deviceConnectTime ? Math.round((Date.now() - deviceConnectTime) / 1000) : "?";
+      showToast(`⚠ Device sudah ${elapsed}s terhubung. Segera beri nama!`, "error");
+    }
+  }, 30000);
 }
+
 async function openModalManual() {
   if (!deviceOnline) { showToast("Tidak ada device yang terhubung", "error"); return; }
   if (isRunning && activeDevice) { showToast(`"${activeDevice.name}" sedang dimonitor`, "error"); return; }
   waitingForName = false;
   const history   = await getHistory();
   const usedNames = history.map(h => h.name);
-  modalTitle.textContent = "Tambah Device";
-  modalSub.textContent   = "Berikan nama untuk device yang terhubung.";
+  const modalTitleEl = document.querySelector("#modal-add-device .modal-title");
+  const modalSubEl   = document.querySelector("#modal-add-device .modal-sub");
+  if (modalTitleEl) modalTitleEl.textContent = "Tambah Device";
+  if (modalSubEl)   modalSubEl.textContent   = "Berikan nama untuk device yang terhubung.";
   inputDevName.value     = "";
   inputDevName.dataset.usedNames = JSON.stringify(usedNames);
   modalAdd.classList.add("open");
   setTimeout(() => inputDevName.focus(), 100);
 }
+
 function closeModal() {
-  modalAdd.classList.remove("open"); inputDevName.value = ""; waitingForName = false;
+  modalAdd.classList.remove("open");
+  inputDevName.value = "";
+  waitingForName = false;
+  clearTimeout(namingReminderTimeout);
 }
 
 fab.addEventListener("click", openModalManual);
@@ -388,15 +415,12 @@ btnStop.addEventListener("click", async () => {
 });
 
 // ================= FIREBASE LIVE LISTENER =================
-// FIX: gunakan onValue (realtime) bukan polling interval
-// Setiap ada update dari ESP32, variabel langsung terupdate
 onValue(ref(db, "live"), snapshot => {
   const data = snapshot.val();
   if (!data) return;
   const sys = data.system || {};
   systemInternet    = sys.internet === true;
   firebaseTimestamp = sys.timestamp || 0;
-  firebaseThreshold = sys.threshold || settings.overloadThreshold;
   const dev = data.device || {};
   voltage          = dev.voltage   || 0;
   current          = dev.current   || 0;
@@ -416,25 +440,29 @@ function updateMeters() {
   systemOnline = systemInternet && firebaseTimestamp > 0 && diff <= 120;
   deviceOnline = systemOnline && current > 0.01 && firebasePower > 0.5;
 
-  // ✅ FIX: cek overload dari sisi web, tidak bergantung ESP32
-  const effectiveThreshold = settings.overloadThreshold || 2000;
-  const webOverload = deviceOnline && 
-  firebasePower > 0 && 
-  firebasePower >= settings.overloadThreshold;
+  // Cek overload dari sisi web menggunakan settings.overloadThreshold
+  const webOverload = deviceOnline && firebasePower > 0 && firebasePower >= settings.overloadThreshold;
 
   setSystemStatus(systemOnline);
   subWebStatus.textContent = `Web: ${systemOnline ? "online" : "offline"}`;
   subTariff.textContent    = `Tariff: ${symbol()} ${settings.tariff.toLocaleString("id-ID")}/kWh`;
 
-  // Device baru connect
+  // ── Device baru connect ──
   if (!prevDeviceConnected && deviceOnline) {
+    // FIX #6: Simpan waktu & energi saat device PERTAMA terdeteksi
+    deviceConnectTime   = Date.now();
+    deviceConnectEnergy = firebaseEnergy;
+
     if (!isRunning && !waitingForName) {
       if (settings.notifDevice) showToast("⚡ Device baru terdeteksi! Silakan beri nama.", "success");
       openModalAuto();
     }
   }
-  // Device disconnect
+
+  // ── Device disconnect ──
   if (prevDeviceConnected && !deviceOnline && systemOnline) {
+    deviceConnectTime   = null;
+    deviceConnectEnergy = 0;
     if (waitingForName) {
       closeModal(); showToast("Device dicabut sebelum diberi nama", "error");
     } else if (isRunning && activeDevice) {
@@ -445,10 +473,10 @@ function updateMeters() {
   }
   prevDeviceConnected = deviceOnline;
 
-  // Overload
+  // ── Overload ──
   if (webOverload && !prevOverload) {
     if (settings.notifOverload)
-      showToast(`⚠ OVERLOAD! Daya melebihi ${effectiveThreshold}W`, "error");
+      showToast(`⚠ OVERLOAD! Daya melebihi ${settings.overloadThreshold}W`, "error");
     setDeviceBadge("overload");
     setOverloadBanner(true);
   }
@@ -463,7 +491,7 @@ function updateMeters() {
   if (!systemOnline) { setDeviceBadge("unknown"); clearDisplay(); return; }
   if (!deviceOnline) { setDeviceBadge("offline"); clearDisplay(); return; }
 
-  if (!firebaseOverload) setDeviceBadge("connected");
+  if (!webOverload) setDeviceBadge("connected");
   updateDisplay();
 
   const t = new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -481,15 +509,15 @@ function startMetersInterval() {
 }
 
 // ================= INIT =================
-await loadSettings();
-
 // Restore active session dari Firebase
 const savedActive = await loadActiveSession();
 if (savedActive && savedActive.id) {
-  activeDevice   = { id: savedActive.id, name: savedActive.name };
-  startTime      = savedActive.startTime      || null;
-  energyBaseline = savedActive.energyBaseline || 0;
-  isRunning      = !!startTime;
+  activeDevice        = { id: savedActive.id, name: savedActive.name };
+  startTime           = savedActive.startTime      || null;
+  energyBaseline      = savedActive.energyBaseline || 0;
+  deviceConnectTime   = savedActive.startTime      || null;
+  deviceConnectEnergy = savedActive.energyBaseline || 0;
+  isRunning           = !!startTime;
   valDeviceName.textContent  = activeDevice.name;
   activeDevLabel.textContent = `Monitoring: ${activeDevice.name}`;
   btnStop.style.display      = "inline-flex";

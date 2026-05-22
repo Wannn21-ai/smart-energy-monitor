@@ -1,4 +1,7 @@
-import { requireAuth, renderShell, fillUserInfo, showToast, startStatusWatcher } from "./auth-guard.js";
+import {
+  requireAuth, renderShell, fillUserInfo, showToast,
+  startStatusWatcher, loadAndApplySettings
+} from "./auth-guard.js";
 import { db, ref, set, get, onValue } from "./firebase-config.js";
 
 const user = await requireAuth();
@@ -6,6 +9,9 @@ renderShell("history", "HISTORY");
 fillUserInfo(user);
 startStatusWatcher();
 const uid = user.uid;
+
+// Load dan apply theme + language dari Firebase/localStorage
+await loadAndApplySettings(uid);
 
 // ================= FIREBASE =================
 const historyRef = ref(db, `users/${uid}/history`);
@@ -15,7 +21,6 @@ let activeFilter = "all";
 let searchKeyword = "";
 
 // ================= LOAD =================
-// Gunakan onValue supaya realtime — kalau save dari device lain langsung update
 onValue(historyRef, snapshot => {
   if (!snapshot.exists()) {
     historyData = [];
@@ -100,7 +105,6 @@ function render() {
 
 // ================= CLICK EVENTS =================
 listEl.addEventListener("click", async e => {
-  // Export single
   if (e.target.classList.contains("btn-export")) {
     e.stopPropagation();
     const key     = e.target.dataset.key;
@@ -108,7 +112,6 @@ listEl.addEventListener("click", async e => {
     if (session) exportSingleCSV(session);
     return;
   }
-  // Delete single — hapus dari Firebase pakai key
   if (e.target.classList.contains("btn-delete")) {
     e.stopPropagation();
     const key = e.target.dataset.key;
@@ -119,10 +122,8 @@ listEl.addEventListener("click", async e => {
     } catch { showToast("Failed to delete", "error"); }
     return;
   }
-  // Open detail
   const card = e.target.closest(".history-card");
   if (card) {
-    // Simpan key ke sessionStorage supaya detail page bisa ambil dari Firebase
     sessionStorage.setItem(`sem_selected_key_${uid}`, card.dataset.key);
     window.location.href = "history-detail.html";
   }

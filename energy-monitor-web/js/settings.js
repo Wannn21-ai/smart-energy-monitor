@@ -1,8 +1,9 @@
 import {
   requireAuth, renderShell, fillUserInfo, showToast,
-  startStatusWatcher, applyTheme
+  startStatusWatcher, applyTheme, applyLanguage,
+  loadAndApplySettings
 } from "./auth-guard.js";
-import { auth, db, ref, set, get } from "./firebase-config.js";
+import { auth, db, ref, set, get, update } from "./firebase-config.js";
 import { updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const user = await requireAuth();
@@ -27,21 +28,9 @@ const DEFAULTS = {
 let settings = { ...DEFAULTS };
 
 // ================= LOAD SETTINGS =================
-// Coba localStorage dulu (instant), lalu Firebase (sumber kebenaran)
-async function loadSettings() {
-  try {
-    const cached = JSON.parse(localStorage.getItem(`sem_settings_${uid}`));
-    if (cached) { settings = { ...DEFAULTS, ...cached }; applyToUI(); }
-  } catch {}
-  try {
-    const snap = await get(settingsRef);
-    if (snap.exists()) {
-      settings = { ...DEFAULTS, ...snap.val() };
-      localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
-      applyToUI();
-    }
-  } catch (e) { console.warn("Gagal load settings dari Firebase:", e); }
-}
+// Gunakan loadAndApplySettings dari auth-guard (handles theme + language)
+settings = await loadAndApplySettings(uid);
+applyToUI();
 
 async function saveSettingsToFirebase() {
   try {
@@ -67,112 +56,9 @@ function applyToUI() {
   if (el("refresh-interval"))   el("refresh-interval").value  = settings.refreshInterval;
   if (el("display-name"))       el("display-name").value      = user.displayName || "";
   if (el("display-email"))      el("display-email").value     = user.email || "";
-  applyLanguage(settings.language);
-  applyTheme(settings.theme);
+  // applyLanguage & applyTheme sudah dipanggil oleh loadAndApplySettings
   highlightThemeBtn(settings.theme);
   updateConvertedPreview();
-}
-
-// ================= TRANSLATIONS =================
-const LANG = {
-  en: {
-    settingsTitle:"Settings", settingsSub:"Manage your preferences — synced across all devices",
-    pricingTitle:"💰 Energy Pricing", currencyLabel:"Currency",
-    tariffLabel:"Tariff per kWh", thresholdLabel:"Overload Threshold (Watt)",
-    thresholdSub:"Alert when device power exceeds this value",
-    savePricing:"Save Pricing & Threshold",
-    accountTitle:"👤 Account", nameLabel:"Display Name", emailLabel:"Email",
-    saveProfile:"Update Profile",
-    appearanceTitle:"🎨 Appearance", themeLabel:"Theme",
-    themeDark:"Dark", themeDarker:"Darker", themeLight:"Light",
-    langLabel:"Language", saveAppearance:"Save Appearance",
-    notifTitle:"🔔 Notifications & Dashboard",
-    notifDevice:"Device connected notification",
-    notifDeviceSub:"Show toast when device is plugged in",
-    notifDisconnect:"Device disconnected notification",
-    notifDisconnectSub:"Show toast when device is unplugged",
-    notifSession:"Session saved notification",
-    notifSessionSub:"Show toast when session is saved",
-    notifOverload:"Overload notification",
-    notifOverloadSub:"Show alert when power exceeds threshold",
-    refreshLabel:"Dashboard refresh interval", saveNotif:"Save Preferences",
-    dataTitle:"📊 Data Control",
-    dataSub:"History and settings are synced to your account across all devices.",
-    exportAll:"↓ Export All History CSV", deleteAll:"✕ Delete All History",
-    aboutTitle:"ℹ About", aboutApp:"Application", aboutVer:"Version",
-    aboutHw:"Hardware", aboutCloud:"Cloud",
-  },
-  id: {
-    settingsTitle:"Pengaturan", settingsSub:"Kelola preferensi kamu — tersinkron di semua perangkat",
-    pricingTitle:"💰 Harga Energi", currencyLabel:"Mata Uang",
-    tariffLabel:"Tarif per kWh", thresholdLabel:"Batas Overload (Watt)",
-    thresholdSub:"Kirim peringatan saat daya melebihi nilai ini",
-    savePricing:"Simpan Tarif & Threshold",
-    accountTitle:"👤 Akun", nameLabel:"Nama Tampilan", emailLabel:"Email",
-    saveProfile:"Perbarui Profil",
-    appearanceTitle:"🎨 Tampilan", themeLabel:"Tema",
-    themeDark:"Gelap", themeDarker:"Lebih Gelap", themeLight:"Terang",
-    langLabel:"Bahasa", saveAppearance:"Simpan Tampilan",
-    notifTitle:"🔔 Notifikasi & Dashboard",
-    notifDevice:"Notifikasi device terhubung",
-    notifDeviceSub:"Tampilkan notifikasi saat device dicolok",
-    notifDisconnect:"Notifikasi device dicabut",
-    notifDisconnectSub:"Tampilkan notifikasi saat device dicabut",
-    notifSession:"Notifikasi sesi tersimpan",
-    notifSessionSub:"Tampilkan notifikasi saat sesi disimpan",
-    notifOverload:"Notifikasi overload",
-    notifOverloadSub:"Tampilkan peringatan saat daya melebihi batas",
-    refreshLabel:"Interval refresh dashboard", saveNotif:"Simpan Preferensi",
-    dataTitle:"📊 Kontrol Data",
-    dataSub:"Riwayat dan pengaturan tersinkron ke akun kamu di semua perangkat.",
-    exportAll:"↓ Ekspor Semua Riwayat CSV", deleteAll:"✕ Hapus Semua Riwayat",
-    aboutTitle:"ℹ Tentang", aboutApp:"Aplikasi", aboutVer:"Versi",
-    aboutHw:"Perangkat Keras", aboutCloud:"Cloud",
-  }
-};
-
-function applyLanguage(lang) {
-  const t = LANG[lang] || LANG.en;
-  const s = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-  s("txt-settings-title",       t.settingsTitle);
-  s("txt-settings-sub",         t.settingsSub);
-  s("txt-pricing-title",        t.pricingTitle);
-  s("txt-currency-label",       t.currencyLabel);
-  s("txt-tariff-label",         t.tariffLabel);
-  s("txt-threshold-label",      t.thresholdLabel);
-  s("txt-threshold-sub",        t.thresholdSub);
-  s("txt-save-pricing",         t.savePricing);
-  s("txt-account-title",        t.accountTitle);
-  s("txt-name-label",           t.nameLabel);
-  s("txt-email-label",          t.emailLabel);
-  s("txt-save-profile",         t.saveProfile);
-  s("txt-appearance-title",     t.appearanceTitle);
-  s("txt-theme-label",          t.themeLabel);
-  s("txt-theme-dark",           t.themeDark);
-  s("txt-theme-darker",         t.themeDarker);
-  s("txt-theme-light",          t.themeLight);
-  s("txt-lang-label",           t.langLabel);
-  s("txt-save-appearance",      t.saveAppearance);
-  s("txt-notif-title",          t.notifTitle);
-  s("txt-notif-device",         t.notifDevice);
-  s("txt-notif-device-sub",     t.notifDeviceSub);
-  s("txt-notif-disconnect",     t.notifDisconnect);
-  s("txt-notif-disconnect-sub", t.notifDisconnectSub);
-  s("txt-notif-session",        t.notifSession);
-  s("txt-notif-session-sub",    t.notifSessionSub);
-  s("txt-notif-overload",       t.notifOverload);
-  s("txt-notif-overload-sub",   t.notifOverloadSub);
-  s("txt-refresh-label",        t.refreshLabel);
-  s("txt-save-notif",           t.saveNotif);
-  s("txt-data-title",           t.dataTitle);
-  s("txt-data-sub",             t.dataSub);
-  s("txt-export-all",           t.exportAll);
-  s("txt-delete-all",           t.deleteAll);
-  s("txt-about-title",          t.aboutTitle);
-  s("txt-about-app",            t.aboutApp);
-  s("txt-about-ver",            t.aboutVer);
-  s("txt-about-hw",             t.aboutHw);
-  s("txt-about-cloud",          t.aboutCloud);
 }
 
 function highlightThemeBtn(theme) {
@@ -212,6 +98,11 @@ document.getElementById("btn-save-settings").addEventListener("click", async () 
   if (isNaN(threshold) || threshold <= 0) { showToast("Enter a valid threshold value", "error"); return; }
   settings = { ...settings, currency, tariff, overloadThreshold: threshold };
   await saveSettingsToFirebase();
+  // Tulis threshold ke /config/threshold — dibaca ESP32 setiap 30 detik
+  try {
+    await set(ref(db, "config/threshold"), threshold);
+    console.log("[SEM] Threshold synced:", threshold);
+  } catch (e) { console.warn("[SEM] Gagal sync threshold:", e); }
   showToast("Settings saved ✓", "success");
 });
 
@@ -232,15 +123,16 @@ document.getElementById("btn-save-appearance").addEventListener("click", async (
   const language = document.getElementById("language").value;
   settings = { ...settings, theme, language };
   await saveSettingsToFirebase();
+  // Apply langsung + simpan ke localStorage supaya halaman lain ikut
   localStorage.setItem(`sem_theme_${uid}`, theme);
-  applyLanguage(language);
   applyTheme(theme);
+  applyLanguage(language);
   showToast("Appearance saved ✓", "success");
 });
 document.querySelectorAll(".theme-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     highlightThemeBtn(btn.dataset.theme);
-    applyTheme(btn.dataset.theme);
+    applyTheme(btn.dataset.theme); // preview langsung
   });
 });
 
@@ -283,6 +175,3 @@ document.getElementById("btn-delete-all").addEventListener("click", async () => 
     showToast("All history deleted", "");
   } catch { showToast("Failed to delete", "error"); }
 });
-
-// ================= INIT =================
-await loadSettings();
