@@ -32,13 +32,24 @@ let settings = { ...DEFAULTS };
 settings = await loadAndApplySettings(uid);
 applyToUI();
 
-async function saveSettingsToFirebase() {
+function sanitizeForFirebase(obj) {
+  const clean = {};
+  for (const [key, val] of Object.entries(obj)) {
+    if (val !== undefined && val !== null) clean[key] = val;
+  }
+  return clean;
+}
+
+async function saveSettingsToFirebase(partial) {
+  const payload = sanitizeForFirebase(partial);
   try {
-    await set(settingsRef, settings);
+    await update(settingsRef, payload);
+    settings = { ...settings, ...payload }; // update local settings  
+    localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings)); // backup lokal
+  } catch (e){
+    console.error("[SEM] Firebase update gagal:", e);
     localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
-  } catch {
     showToast("Gagal sync ke cloud, tersimpan lokal", "");
-    localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
   }
 }
 
@@ -96,13 +107,21 @@ document.getElementById("btn-save-settings").addEventListener("click", async () 
   const threshold = parseFloat(document.getElementById("overload-threshold").value);
   if (isNaN(tariff)    || tariff    <= 0) { showToast("Enter a valid tariff value",    "error"); return; }
   if (isNaN(threshold) || threshold <= 0) { showToast("Enter a valid threshold value", "error"); return; }
-  settings = { ...settings, currency, tariff, overloadThreshold: threshold };
-  await saveSettingsToFirebase();
+
+  const btn = document.getElementById("btn-save-settings");
+  btn.disabled = true;
+  btn.querySelector("span").textContent = "Saving...";
+
+  await saveSettingsToFirebase({ currency, tariff, overloadThreshold: threshold });
+
   // Tulis threshold ke /config/threshold — dibaca ESP32 setiap 30 detik
   try {
     await set(ref(db, "config/threshold"), threshold);
-    console.log("[SEM] Threshold synced:", threshold);
-  } catch (e) { console.warn("[SEM] Gagal sync threshold:", e); }
+    console.log("[SEM] Threshold synced to /config/threshold:", threshold);
+  } catch (e) { console.warn("[SEM] Gagal sync threshold ke /config:", e); }
+  
+  btn.disabled = false;
+  btn.querySelector("span").textContent = "Save Settings";
   showToast("Settings saved ✓", "success");
 });
 
@@ -121,8 +140,8 @@ document.getElementById("btn-save-profile").addEventListener("click", async () =
 document.getElementById("btn-save-appearance").addEventListener("click", async () => {
   const theme    = document.querySelector(".theme-btn.active")?.dataset.theme || "dark";
   const language = document.getElementById("language").value;
-  settings = { ...settings, theme, language };
-  await saveSettingsToFirebase();
+  
+  await saveSettingsToFirebase({ theme, language });
   // Apply langsung + simpan ke localStorage supaya halaman lain ikut
   localStorage.setItem(`sem_theme_${uid}`, theme);
   applyTheme(theme);
@@ -138,15 +157,14 @@ document.querySelectorAll(".theme-btn").forEach(btn => {
 
 // ================= SAVE NOTIFICATIONS =================
 document.getElementById("btn-save-notif").addEventListener("click", async () => {
-  settings = {
-    ...settings,
+  const partial = {
     notifDevice:     document.getElementById("notif-device").checked,
     notifDisconnect: document.getElementById("notif-disconnect").checked,
     notifSession:    document.getElementById("notif-session").checked,
     notifOverload:   document.getElementById("notif-overload").checked,
     refreshInterval: parseInt(document.getElementById("refresh-interval").value)
   };
-  await saveSettingsToFirebase();
+  await saveSettingsToFirebase(partial);
   showToast("Preferences saved ✓", "success");
 });
 

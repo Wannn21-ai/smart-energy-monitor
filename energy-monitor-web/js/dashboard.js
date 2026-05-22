@@ -57,6 +57,7 @@ let sessionSaved = false;
 let activeDevice = null, waitingForName = false, metersInterval = null;
 let energyBaseline = 0;
 let sessionCount = 0;
+let lastknownEnergy = 0;
 
 // ================= STORAGE (Firebase) =================
 async function getHistory() {
@@ -162,7 +163,7 @@ const formatCost = v  => settings.currency === "USD"
   ? `$ ${v.toFixed(2)}`
   : `Rp ${Math.round(v).toLocaleString("id-ID")}`;
 
-function getSessionEnergy() { return Math.max(0, firebaseEnergy - energyBaseline); }
+function getSessionEnergy() { return Math.max(0, lastknownEnergy - energyBaseline); }
 function getSessionCost()   { return getSessionEnergy() * settings.tariff; }
 
 function generateUniqueName(base, usedNames) {
@@ -255,7 +256,12 @@ async function renderDeviceTabs() {
 async function saveSession() {
   const sessEnergy = getSessionEnergy();
   const sessCost   = getSessionCost();
-  if (sessionSaved || !activeDevice || sessEnergy <= 0) return;
+  if (sessionSaved || !activeDevice || sessEnergy <= 0) {
+    if (!sessionSaved && activeDevice && sessEnergy <= 0) {
+      console.warn("[SEM] saveSession: sessEnergy=0, lastknownEnergy=", lastknownEnergy, "baseline=", energyBaseline);
+    }
+    return;
+  }
   await pushHistory({
     name:      activeDevice.name,
     duration:  getDuration(),
@@ -277,6 +283,8 @@ async function resetMonitoring() {
   clearInterval(timerInterval);
   timerInterval = null; startTime = null; isRunning = false;
   sessionSaved = false; energyBaseline = 0; activeDevice = null;
+
+  lastknownEnergy = 0;
   await saveActiveSession(null);
   voltage = current = firebasePower = 0;
   clearDisplay();
@@ -305,7 +313,7 @@ async function startMonitoring(name) {
   // (bukan saat user submit nama)
   startTime      = deviceConnectTime   || Date.now();
   energyBaseline = deviceConnectEnergy !== undefined ? deviceConnectEnergy : firebaseEnergy;
-
+  lastknownEnergy = energyBaseline;
   isRunning = true; sessionSaved = false;
   await saveActiveSession({ ...activeDevice, startTime, energyBaseline });
   valDeviceName.textContent  = name;
@@ -431,6 +439,10 @@ onValue(ref(db, "live"), snapshot => {
   firebaseEnergy   = dev.energy    || 0;
   firebaseCost     = dev.cost      || 0;
   firebaseOverload = dev.overload  === true;
+
+  if (current > 0.01 && firebasePower > 0.5 && firebaseEnergy > 0) {
+    lastknownEnergy = firebaseEnergy;
+  }
 });
 
 // ================= MAIN LOOP =================
@@ -452,6 +464,7 @@ function updateMeters() {
     // FIX #6: Simpan waktu & energi saat device PERTAMA terdeteksi
     deviceConnectTime   = Date.now();
     deviceConnectEnergy = firebaseEnergy;
+    lastknownEnergy    = firebaseEnergy;
 
     if (!isRunning && !waitingForName) {
       if (settings.notifDevice) showToast("⚡ Device baru terdeteksi! Silakan beri nama.", "success");
@@ -515,6 +528,7 @@ if (savedActive && savedActive.id) {
   activeDevice        = { id: savedActive.id, name: savedActive.name };
   startTime           = savedActive.startTime      || null;
   energyBaseline      = savedActive.energyBaseline || 0;
+  lastknownEnergy     = energyBaseline;
   deviceConnectTime   = savedActive.startTime      || null;
   deviceConnectEnergy = savedActive.energyBaseline || 0;
   isRunning           = !!startTime;
