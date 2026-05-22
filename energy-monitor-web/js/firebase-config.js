@@ -29,4 +29,5 @@ const app  = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db   = getDatabase(app);
 
+// PERBAIKAN: Pastikan `update` ikut di-export
 export { auth, db, ref, onValue, set, push, remove, get, update };
