@@ -6,7 +6,14 @@
 import { initializeApp }  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth }        from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  getDatabase, ref, onValue, set, push, remove, get, update
+  getDatabase,
+  ref,
+  onValue,
+  set,
+  push,
+  remove,
+  get,
+  update    // ← pastikan ini ada
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 function getMeta(name) {
@@ -29,5 +36,5 @@ const app  = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db   = getDatabase(app);
 
-// PERBAIKAN: Pastikan `update` ikut di-export
+// Export semua — termasuk `update` secara eksplisit
 export { auth, db, ref, onValue, set, push, remove, get, update };

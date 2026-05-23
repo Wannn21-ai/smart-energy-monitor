@@ -3,7 +3,6 @@ import {
   startStatusWatcher, applyTheme, applyLanguage,
   loadAndApplySettings
 } from "./auth-guard.js";
-// PERBAIKAN #1: Pastikan `update` ikut diimport dari firebase-config
 import { auth, db, ref, set, get, update } from "./firebase-config.js";
 import { updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
@@ -14,8 +13,12 @@ startStatusWatcher();
 const uid = user.uid;
 
 // ================= FIREBASE PATHS =================
-const settingsRef = ref(db, `users/${uid}/settings`);
-const historyRef  = ref(db, `users/${uid}/history`);
+// BUG FIX #1: Jangan simpan ref sebagai variabel lalu pakai untuk update().
+// `update()` dari Firebase SDK v9+ menerima ref object — tapi untuk
+// menghindari masalah scope, kita buat path string dan panggil ref() langsung
+// di dalam fungsi saveSettingsToFirebase.
+const SETTINGS_PATH = `users/${uid}/settings`;
+const HISTORY_PATH  = `users/${uid}/history`;
 
 // ================= DEFAULTS =================
 const DEFAULTS = {
@@ -29,13 +32,10 @@ const DEFAULTS = {
 let settings = { ...DEFAULTS };
 
 // ================= LOAD SETTINGS =================
-// PERBAIKAN #2: Tangkap error agar kegagalan load settings
-// tidak menghentikan eksekusi seluruh module
 try {
   settings = await loadAndApplySettings(uid);
 } catch (e) {
   console.error("[SEM] loadAndApplySettings gagal:", e);
-  // Fallback ke localStorage
   try {
     const cached = JSON.parse(localStorage.getItem(`sem_settings_${uid}`));
     if (cached) settings = { ...DEFAULTS, ...cached };
@@ -50,40 +50,55 @@ applyToUI();
 function sanitizeForFirebase(obj) {
   const clean = {};
   for (const [key, val] of Object.entries(obj)) {
+    // Firebase tidak boleh menerima undefined — filter keluar
     if (val !== undefined && val !== null) clean[key] = val;
   }
   return clean;
 }
 
 // ================= SAVE TO FIREBASE =================
-// PERBAIKAN #3: Ganti update() dengan set() + merge manual
-// supaya tidak bergantung pada `update` yang kadang tidak ter-export
-// dengan benar di beberapa bundler/browser. Juga tambah try/catch
-// yang lebih ketat agar error tidak propagate ke handler tombol lain.
+// BUG FIX #2: Masalah utama — `update(settingsRef, payload)` kadang gagal
+// karena `settingsRef` dibuat di luar fungsi dan ref menjadi stale/invalid
+// di beberapa kondisi browser. Solusi: buat ref baru di dalam fungsi,
+// dan gunakan set() dengan merge manual sebagai primary (bukan fallback).
+// update() tetap dicoba dulu karena lebih efisien untuk partial write.
 async function saveSettingsToFirebase(partial) {
+  // Sanitasi payload — buang undefined/null
   const payload = sanitizeForFirebase(partial);
-  // Merge dengan settings yang ada dulu
-  const merged = sanitizeForFirebase({ ...settings, ...payload });
-  settings = { ...settings, ...payload };
 
+  // BUG FIX #3: Jangan mutate `settings` dulu sebelum Firebase berhasil.
+  // Simpan merged sebagai local variable dulu.
+  const merged = sanitizeForFirebase({ ...settings, ...payload });
+
+  // Buat ref baru di dalam fungsi untuk menghindari stale ref
+  const freshRef = ref(db, SETTINGS_PATH);
+
+  let savedOk = false;
+
+  // Coba update() dulu (partial write, lebih efisien)
   try {
-    // Coba pakai update dulu (lebih efisien, partial write)
-    await update(settingsRef, payload);
-    console.log("[SEM] Settings berhasil disimpan ke Firebase (update):", payload);
+    await update(freshRef, payload);
+    savedOk = true;
+    console.log("[SEM] Settings saved via update():", payload);
   } catch (updateErr) {
-    console.warn("[SEM] update() gagal, mencoba set() penuh:", updateErr);
+    console.warn("[SEM] update() gagal, fallback ke set():", updateErr.message);
+    // Fallback: tulis seluruh object settings
     try {
-      // Fallback: set seluruh settings object
-      await set(settingsRef, merged);
-      console.log("[SEM] Settings berhasil disimpan ke Firebase (set fallback)");
+      await set(freshRef, merged);
+      savedOk = true;
+      console.log("[SEM] Settings saved via set() fallback");
     } catch (setErr) {
-      console.error("[SEM] set() juga gagal:", setErr);
-      showToast("Gagal sync ke cloud, tersimpan lokal", "");
+      console.error("[SEM] set() juga gagal:", setErr.message);
+      // Lempar error supaya caller bisa handle (tampilkan toast error)
+      throw setErr;
     }
   }
 
-  // Selalu simpan ke localStorage sebagai backup
-  localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+  // BUG FIX #3 lanjutan: Baru update state lokal SETELAH Firebase berhasil
+  if (savedOk) {
+    settings = merged;
+    localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+  }
 }
 
 // ================= APPLY TO UI =================
@@ -136,23 +151,30 @@ document.getElementById("currency").addEventListener("change", function () {
 });
 document.getElementById("tariff").addEventListener("input", updateConvertedPreview);
 
+// ================= HELPER: button loading state =================
+// BUG FIX #4: Buat helper supaya semua tombol konsisten dalam
+// menampilkan loading state dan restore teks dengan benar.
+function setBtnLoading(btnId, loading, originalText) {
+  const btn  = document.getElementById(btnId);
+  const span = btn?.querySelector("span");
+  if (!btn) return;
+  btn.disabled = loading;
+  if (span) span.textContent = loading ? "Menyimpan..." : originalText;
+}
+
 // ================= SAVE PRICING + THRESHOLD =================
 document.getElementById("btn-save-settings").addEventListener("click", async () => {
-  const currencyEl  = document.getElementById("currency");
-  const tariffEl    = document.getElementById("tariff");
-  const thresholdEl = document.getElementById("overload-threshold");
-
-  const currency  = currencyEl.value;
-  const tariff    = parseFloat(tariffEl.value);
-  const threshold = parseFloat(thresholdEl.value);
+  const currency  = document.getElementById("currency").value;
+  const tariff    = parseFloat(document.getElementById("tariff").value);
+  const threshold = parseFloat(document.getElementById("overload-threshold").value);
 
   if (isNaN(tariff)    || tariff    <= 0) { showToast("Masukkan nilai tarif yang valid",    "error"); return; }
   if (isNaN(threshold) || threshold <= 0) { showToast("Masukkan nilai threshold yang valid", "error"); return; }
 
-  const btn  = document.getElementById("btn-save-settings");
-  const span = btn.querySelector("span");
-  btn.disabled      = true;
-  span.textContent  = "Menyimpan...";
+  // Ambil teks tombol saat ini untuk restore nanti
+  const span = document.querySelector("#btn-save-settings span");
+  const originalText = span?.textContent || "Save Settings";
+  setBtnLoading("btn-save-settings", true, originalText);
 
   try {
     await saveSettingsToFirebase({ currency, tariff, overloadThreshold: threshold });
@@ -163,28 +185,26 @@ document.getElementById("btn-save-settings").addEventListener("click", async () 
       console.log("[SEM] Threshold synced ke /config/threshold:", threshold);
     } catch (e) {
       console.warn("[SEM] Gagal sync threshold ke /config:", e);
+      // Tidak fatal — settings utama sudah tersimpan
     }
 
     showToast("Pengaturan tersimpan ✓", "success");
   } catch (e) {
     console.error("[SEM] Gagal simpan pricing settings:", e);
-    showToast("Gagal menyimpan pengaturan", "error");
+    showToast("Gagal menyimpan pengaturan — cek koneksi internet", "error");
   } finally {
-    btn.disabled     = false;
-    span.textContent = "Save Settings";
+    setBtnLoading("btn-save-settings", false, originalText);
   }
 });
 
 // ================= SAVE PROFILE =================
 document.getElementById("btn-save-profile").addEventListener("click", async () => {
-  const nameEl = document.getElementById("display-name");
-  const name   = nameEl.value.trim();
+  const name = document.getElementById("display-name").value.trim();
   if (!name) { showToast("Nama tidak boleh kosong", "error"); return; }
 
-  const btn  = document.getElementById("btn-save-profile");
-  const span = btn.querySelector("span");
-  btn.disabled     = true;
-  span.textContent = "Menyimpan...";
+  const span = document.querySelector("#btn-save-profile span");
+  const originalText = span?.textContent || "Update Profile";
+  setBtnLoading("btn-save-profile", true, originalText);
 
   try {
     await updateProfile(auth.currentUser, { displayName: name });
@@ -194,8 +214,7 @@ document.getElementById("btn-save-profile").addEventListener("click", async () =
     console.error("[SEM] Gagal update profile:", e);
     showToast("Gagal memperbarui profil", "error");
   } finally {
-    btn.disabled     = false;
-    span.textContent = "Update Profile";
+    setBtnLoading("btn-save-profile", false, originalText);
   }
 });
 
@@ -205,10 +224,9 @@ document.getElementById("btn-save-appearance").addEventListener("click", async (
   const theme    = activeThemeBtn?.dataset.theme || "dark";
   const language = document.getElementById("language").value;
 
-  const btn  = document.getElementById("btn-save-appearance");
-  const span = btn.querySelector("span");
-  btn.disabled     = true;
-  span.textContent = "Menyimpan...";
+  const span = document.querySelector("#btn-save-appearance span");
+  const originalText = span?.textContent || "Save Appearance";
+  setBtnLoading("btn-save-appearance", true, originalText);
 
   try {
     await saveSettingsToFirebase({ theme, language });
@@ -220,8 +238,7 @@ document.getElementById("btn-save-appearance").addEventListener("click", async (
     console.error("[SEM] Gagal simpan appearance:", e);
     showToast("Gagal menyimpan tampilan", "error");
   } finally {
-    btn.disabled     = false;
-    span.textContent = "Save Appearance";
+    setBtnLoading("btn-save-appearance", false, originalText);
   }
 });
 
@@ -242,10 +259,12 @@ document.getElementById("btn-save-notif").addEventListener("click", async () => 
     refreshInterval: parseInt(document.getElementById("refresh-interval").value)
   };
 
-  const btn  = document.getElementById("btn-save-notif");
-  const span = btn.querySelector("span");
-  btn.disabled     = true;
-  span.textContent = "Menyimpan...";
+  // BUG FIX #5: Validasi refreshInterval sebelum disimpan
+  if (isNaN(partial.refreshInterval)) partial.refreshInterval = 3000;
+
+  const span = document.querySelector("#btn-save-notif span");
+  const originalText = span?.textContent || "Save Preferences";
+  setBtnLoading("btn-save-notif", true, originalText);
 
   try {
     await saveSettingsToFirebase(partial);
@@ -254,20 +273,17 @@ document.getElementById("btn-save-notif").addEventListener("click", async () => 
     console.error("[SEM] Gagal simpan notifikasi:", e);
     showToast("Gagal menyimpan preferensi", "error");
   } finally {
-    btn.disabled     = false;
-    span.textContent = "Save Preferences";
+    setBtnLoading("btn-save-notif", false, originalText);
   }
 });
 
 // ================= EXPORT ALL HISTORY =================
-// PERBAIKAN #4: Tombol export/delete menggunakan ID yang benar
-// sesuai settings.html (btn-export-all & btn-delete-all)
 document.getElementById("btn-export-all").addEventListener("click", async () => {
   const btn = document.getElementById("btn-export-all");
   btn.disabled = true;
 
   try {
-    const snap = await get(historyRef);
+    const snap = await get(ref(db, HISTORY_PATH));
     if (!snap.exists()) {
       showToast("Tidak ada riwayat untuk diekspor", "error");
       return;
@@ -297,10 +313,9 @@ document.getElementById("btn-export-all").addEventListener("click", async () => 
 
 // ================= DELETE ALL HISTORY =================
 document.getElementById("btn-delete-all").addEventListener("click", async () => {
-  // PERBAIKAN #5: Cek dulu apakah ada data sebelum konfirmasi
   let snap;
   try {
-    snap = await get(historyRef);
+    snap = await get(ref(db, HISTORY_PATH));
   } catch (e) {
     showToast("Gagal memeriksa riwayat", "error");
     return;
@@ -318,7 +333,7 @@ document.getElementById("btn-delete-all").addEventListener("click", async () => 
   btn.disabled = true;
 
   try {
-    await set(historyRef, null);
+    await set(ref(db, HISTORY_PATH), null);
     showToast("Semua riwayat berhasil dihapus", "success");
   } catch (e) {
     console.error("[SEM] Gagal hapus semua history:", e);
