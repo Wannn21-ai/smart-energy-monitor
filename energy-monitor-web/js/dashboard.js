@@ -16,6 +16,7 @@ const uid = user.uid;
 const historyRef  = ref(db, `users/${uid}/history`);
 const settingsRef = ref(db, `users/${uid}/settings`);
 const activeRef   = ref(db, `users/${uid}/activeSession`);
+const commandRef  = ref(db, "command/relay"); // path command relay
 
 // ================= SETTINGS =================
 const SETTING_DEFAULTS = {
@@ -24,11 +25,8 @@ const SETTING_DEFAULTS = {
   notifOverload: true, refreshInterval: 3000, theme: "dark", language: "en"
 };
 let settings = { ...SETTING_DEFAULTS };
-
-// loadAndApplySettings dari auth-guard sudah handle theme + language + Firebase sync
 settings = await loadAndApplySettings(uid);
 
-// Re-sync settings setiap 10 detik (settings bisa berubah dari device lain)
 setInterval(async () => {
   try {
     const snap = await get(settingsRef);
@@ -39,7 +37,7 @@ setInterval(async () => {
         settings = remote;
         localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
         applyTheme(settings.theme);
-        startMetersInterval(); // restart jika refreshInterval berubah
+        startMetersInterval();
       }
     }
   } catch {}
@@ -50,8 +48,10 @@ let voltage = 0, current = 0, firebasePower = 0, firebaseTimestamp = 0;
 let firebasePF = 0, firebaseFreq = 0, firebaseApparent = 0;
 let firebaseEnergy = 0, firebaseCost = 0;
 let firebaseOverload = false;
+let firebaseRelay = false; // status relay dari ESP32
 let systemInternet = false, systemOnline = false, deviceOnline = false;
 let prevDeviceConnected = false, prevOverload = false;
+let prevRelayState = false; // track perubahan relay
 let isRunning = false, startTime = null, timerInterval = null;
 let sessionSaved = false;
 let activeDevice = null, waitingForName = false, metersInterval = null;
@@ -59,6 +59,18 @@ let energyBaseline = 0;
 let sessionCount = 0;
 let lastknownEnergy = 0;
 let prevSystemOnline = false;
+
+// ================= RELAY COMMAND =================
+// Kirim perintah relay ke Firebase, ESP32 akan polling dan eksekusi
+async function sendRelayCommand(on) {
+  try {
+    await set(commandRef, on);
+    console.log(`[Relay Command] ${on ? "ON" : "OFF"} dikirim ke Firebase`);
+  } catch (e) {
+    console.error("[Relay Command] Gagal:", e);
+    showToast("Gagal kirim perintah relay", "error");
+  }
+}
 
 // ================= STORAGE (Firebase) =================
 async function getHistory() {
@@ -82,7 +94,6 @@ async function getSessionCount() {
   } catch { return 0; }
 }
 
-// Active session disimpan di Firebase supaya persist antar device/tab
 async function saveActiveSession(data) {
   try { await set(activeRef, data); } catch {}
 }
@@ -116,6 +127,47 @@ const btnSaveDev      = document.getElementById("btn-save-device");
 const gaugeVoltage    = document.getElementById("gauge-voltage");
 const gaugeCurrent    = document.getElementById("gauge-current");
 const overloadBanner  = document.getElementById("overload-banner");
+
+// ================= RELAY STATUS BANNER =================
+// Banner "Siapkan Pengukuran Baru" muncul saat relay OFF dan tidak ada sesi aktif
+let relayBanner = document.getElementById("relay-banner");
+if (!relayBanner) {
+  relayBanner = document.createElement("div");
+  relayBanner.id = "relay-banner";
+  relayBanner.style.cssText = `
+    display:none; align-items:center; justify-content:space-between; gap:12px;
+    background:rgba(0,229,255,0.08); border:1px solid rgba(0,229,255,0.3);
+    border-radius:var(--radius-md); padding:14px 20px; margin-bottom:20px;
+    color:var(--cyan); font-size:13px; font-weight:500;`;
+  relayBanner.innerHTML = `
+    <span>⚡ Stopkontak mati — klik tombol untuk memulai pengukuran baru</span>
+    <button id="btn-prepare" class="btn btn-primary" style="white-space:nowrap;flex-shrink:0;">
+      Siapkan Pengukuran Baru
+    </button>`;
+  // Sisipkan banner tepat setelah overload-banner
+  const ob = document.getElementById("overload-banner");
+  if (ob && ob.parentNode) ob.parentNode.insertBefore(relayBanner, ob.nextSibling);
+  else document.querySelector(".page-content")?.prepend(relayBanner);
+}
+
+function setRelayBanner(show) {
+  relayBanner.style.display = show ? "flex" : "none";
+}
+
+// Event tombol "Siapkan Pengukuran Baru"
+document.addEventListener("click", async e => {
+  if (e.target.id === "btn-prepare" || e.target.closest("#btn-prepare")) {
+    const btn = document.getElementById("btn-prepare");
+    btn.disabled = true;
+    btn.textContent = "Menyalakan...";
+    await sendRelayCommand(true);
+    // Banner akan hilang otomatis saat firebaseRelay berubah jadi true
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = "Siapkan Pengukuran Baru";
+    }, 3000);
+  }
+});
 
 // ================= CHART OPTIONS =================
 function chartTickColor() {
@@ -202,7 +254,6 @@ function updateDisplay() {
 }
 function updateTimer() {
   if (!startTime) return;
-  // startTime adalah kapan device PERTAMA terdeteksi (bukan kapan user input nama)
   const d = Date.now() - startTime;
   const h = String(Math.floor(d / 3600000)).padStart(2, "0");
   const m = String(Math.floor((d % 3600000) / 60000)).padStart(2, "0");
@@ -237,7 +288,8 @@ async function updateSessionCount() {
 function setOverloadBanner(active) {
   if (!overloadBanner) return;
   overloadBanner.style.display = active ? "flex" : "none";
-  if (active) overloadBanner.textContent = `⚠ OVERLOAD DETECTED — Power exceeds ${settings.overloadThreshold}W threshold!`;
+  if (active) overloadBanner.textContent =
+    `⚠ OVERLOAD DETECTED — Power exceeds ${settings.overloadThreshold}W threshold!`;
 }
 
 // ================= DEVICE TABS =================
@@ -257,12 +309,7 @@ async function renderDeviceTabs() {
 async function saveSession() {
   const sessEnergy = getSessionEnergy();
   const sessCost   = getSessionCost();
-  if (sessionSaved || !activeDevice || sessEnergy <= 0) {
-    if (!sessionSaved && activeDevice && sessEnergy <= 0) {
-      console.warn("[SEM] saveSession: sessEnergy=0, lastknownEnergy=", lastknownEnergy, "baseline=", energyBaseline);
-    }
-    return;
-  }
+  if (sessionSaved || !activeDevice || sessEnergy <= 0) return;
   await pushHistory({
     name:      activeDevice.name,
     duration:  getDuration(),
@@ -284,7 +331,6 @@ async function resetMonitoring() {
   clearInterval(timerInterval);
   timerInterval = null; startTime = null; isRunning = false;
   sessionSaved = false; energyBaseline = 0; activeDevice = null;
-
   lastknownEnergy = 0;
   await saveActiveSession(null);
   voltage = current = firebasePower = 0;
@@ -298,20 +344,12 @@ async function resetMonitoring() {
   renderDeviceTabs();
 }
 
-// ================================================================
-// START MONITORING
-// BUG FIX #6: startTime & energyBaseline diset ke SAAT DEVICE
-// PERTAMA TERDETEKSI (deviceConnectTime), bukan saat user input nama.
-// Jadi kalau user telat 1 menit, waktu + energi tetap akurat.
-// ================================================================
-let deviceConnectTime   = null; // kapan device pertama terdeteksi
-let deviceConnectEnergy = 0;    // energyBaseline saat device pertama terdeteksi
+// ================= START MONITORING =================
+let deviceConnectTime   = null;
+let deviceConnectEnergy = 0;
 
 async function startMonitoring(name) {
-  activeDevice = { id: `dev_${Date.now()}`, name };
-
-  // Gunakan waktu & energi saat device PERTAMA TERDETEKSI
-  // (bukan saat user submit nama)
+  activeDevice   = { id: `dev_${Date.now()}`, name };
   startTime      = deviceConnectTime   || Date.now();
   energyBaseline = deviceConnectEnergy !== undefined ? deviceConnectEnergy : firebaseEnergy;
   lastknownEnergy = energyBaseline;
@@ -324,15 +362,10 @@ async function startMonitoring(name) {
   clearInterval(timerInterval);
   timerInterval = setInterval(updateTimer, 1000);
   renderDeviceTabs();
-
-  // Hitung berapa lama device sudah terhubung sebelum user input nama
-  const retroMs = Date.now() - startTime;
+  const retroMs  = Date.now() - startTime;
   const retroMin = Math.round(retroMs / 60000);
-  if (retroMin >= 1) {
-    showToast(`Monitoring "${name}" dimulai ▶ (sudah ${retroMin} mnt terhitung)`, "success");
-  } else {
-    showToast(`Monitoring "${name}" dimulai ▶`, "success");
-  }
+  if (retroMin >= 1) showToast(`Monitoring "${name}" dimulai (sudah ${retroMin} mnt terhitung)`, "success");
+  else               showToast(`Monitoring "${name}" dimulai ▶`, "success");
 }
 
 // ================= CHART UPDATE =================
@@ -353,7 +386,6 @@ async function updateBarPie() {
 }
 
 // ================= MODAL =================
-// Timer untuk notifikasi "sudah X menit menunggu nama"
 let namingReminderTimeout = null;
 
 async function openModalAuto() {
@@ -364,12 +396,10 @@ async function openModalAuto() {
   const modalSubEl   = document.querySelector("#modal-add-device .modal-sub");
   if (modalTitleEl) modalTitleEl.textContent = "⚡ Device Terdeteksi!";
   if (modalSubEl)   modalSubEl.textContent   = "Berikan nama untuk device yang baru terhubung.";
-  inputDevName.value     = "";
+  inputDevName.value = "";
   inputDevName.dataset.usedNames = JSON.stringify(usedNames);
   modalAdd.classList.add("open");
   setTimeout(() => inputDevName.focus(), 100);
-
-  // Reminder setelah 30 detik jika user belum input nama
   clearTimeout(namingReminderTimeout);
   namingReminderTimeout = setTimeout(() => {
     if (waitingForName) {
@@ -389,7 +419,7 @@ async function openModalManual() {
   const modalSubEl   = document.querySelector("#modal-add-device .modal-sub");
   if (modalTitleEl) modalTitleEl.textContent = "Tambah Device";
   if (modalSubEl)   modalSubEl.textContent   = "Berikan nama untuk device yang terhubung.";
-  inputDevName.value     = "";
+  inputDevName.value = "";
   inputDevName.dataset.usedNames = JSON.stringify(usedNames);
   modalAdd.classList.add("open");
   setTimeout(() => inputDevName.focus(), 100);
@@ -416,11 +446,23 @@ btnSaveDev.addEventListener("click", async () => {
 });
 inputDevName.addEventListener("keydown", e => { if (e.key === "Enter") btnSaveDev.click(); });
 
-// ================= STOP =================
+// ================= STOP SESSION =================
+// Stop session = simpan sesi + kirim perintah relay OFF ke ESP32
 btnStop.addEventListener("click", async () => {
   if (!isRunning || !activeDevice) { showToast("Tidak ada sesi yang berjalan", "error"); return; }
+
+  // 1. Simpan sesi terlebih dahulu
   await saveSession();
+
+  // 2. Kirim perintah relay OFF ke Firebase → ESP32 akan matikan stopkontak
+  await sendRelayCommand(false);
+  showToast("Relay OFF — stopkontak dimatikan ⏹", "");
+
+  // 3. Reset monitoring di web
   await resetMonitoring();
+
+  // Banner "Siapkan Pengukuran Baru" akan muncul otomatis saat
+  // firebaseRelay berubah jadi false (ditangkap di updateMeters)
 });
 
 // ================= FIREBASE LIVE LISTENER =================
@@ -430,6 +472,8 @@ onValue(ref(db, "live"), snapshot => {
   const sys = data.system || {};
   systemInternet    = sys.internet === true;
   firebaseTimestamp = sys.timestamp || 0;
+  firebaseRelay     = sys.relay     === true; // baca status relay dari ESP32
+
   const dev = data.device || {};
   voltage          = dev.voltage   || 0;
   current          = dev.current   || 0;
@@ -453,48 +497,60 @@ function updateMeters() {
   systemOnline = systemInternet && firebaseTimestamp > 0 && diff <= 120;
   deviceOnline = systemOnline && current > 0.01 && firebasePower > 0.5;
 
-  // Cek overload dari sisi web menggunakan settings.overloadThreshold
   const webOverload = deviceOnline && firebasePower > 0 && firebasePower >= settings.overloadThreshold;
 
   setSystemStatus(systemOnline);
   subWebStatus.textContent = `Web: ${systemOnline ? "online" : "offline"}`;
   subTariff.textContent    = `Tariff: ${symbol()} ${settings.tariff.toLocaleString("id-ID")}/kWh`;
 
+  // ── Update relay banner ──
+  // Tampil saat: relay OFF, tidak ada sesi aktif, sistem online
+  const showRelayBanner = systemOnline && !firebaseRelay && !isRunning;
+  setRelayBanner(showRelayBanner);
+
+  // ── Relay baru ON (ESP32 konfirmasi) ──
+  if (!prevRelayState && firebaseRelay && systemOnline) {
+    showToast("⚡ Stopkontak menyala — silakan colokkan beban", "success");
+    setRelayBanner(false);
+  }
+  // ── Relay baru OFF (ESP32 konfirmasi) ──
+  if (prevRelayState && !firebaseRelay && systemOnline) {
+    // Banner akan muncul otomatis via showRelayBanner di atas
+  }
+  prevRelayState = firebaseRelay;
+
   // ── Device baru connect ──
   if (!prevDeviceConnected && deviceOnline) {
-    // FIX #6: Simpan waktu & energi saat device PERTAMA terdeteksi
     deviceConnectTime   = Date.now();
     deviceConnectEnergy = firebaseEnergy;
-    lastknownEnergy    = firebaseEnergy;
-
+    lastknownEnergy     = firebaseEnergy;
     if (!isRunning && !waitingForName) {
-      if (settings.notifDevice) showToast("⚡ Device baru terdeteksi! Silakan beri nama.", "success");
+      if (settings.notifDevice) showToast("⚡ Device terdeteksi! Silakan beri nama.", "success");
       openModalAuto();
     }
   }
 
-  // ── Device disconnect ──
-// ── System tiba-tiba offline (ESP32 dimatikan tanpa cabut device) ──
-if (prevSystemOnline && !systemOnline && isRunning && activeDevice) {
-  // Simpan sesi sebelum reset — ini yang hilang sebelumnya
-  if (settings.notifDisconnect)
-    showToast(`⚠ Sistem offline — sesi "${activeDevice.name}" disimpan`, "error");
-  saveSession().then(() => resetMonitoring());
-}
-prevSystemOnline = systemOnline;
-
-// ── Device disconnect (sistem masih online, device dicabut) ──
-if (prevDeviceConnected && !deviceOnline && systemOnline) {
-  deviceConnectTime   = null;
-  deviceConnectEnergy = 0;
-  if (waitingForName) {
-    closeModal(); showToast("Device dicabut sebelum diberi nama", "error");
-  } else if (isRunning && activeDevice) {
+  // ── System offline saat sesi berjalan ──
+  if (prevSystemOnline && !systemOnline && isRunning && activeDevice) {
     if (settings.notifDisconnect)
-      showToast(`Device "${activeDevice.name}" dicabut — sesi dihentikan`, "error");
+      showToast(`⚠ Sistem offline — sesi "${activeDevice.name}" disimpan`, "error");
     saveSession().then(() => resetMonitoring());
   }
-}
+  prevSystemOnline = systemOnline;
+
+  // ── Device disconnect (sistem masih online) ──
+  if (prevDeviceConnected && !deviceOnline && systemOnline) {
+    deviceConnectTime   = null;
+    deviceConnectEnergy = 0;
+    if (waitingForName) {
+      closeModal(); showToast("Device dicabut sebelum diberi nama", "error");
+    } else if (isRunning && activeDevice) {
+      if (settings.notifDisconnect)
+        showToast(`Device "${activeDevice.name}" dicabut — sesi dihentikan`, "error");
+      saveSession().then(() => resetMonitoring());
+    }
+  }
+  prevDeviceConnected = deviceOnline;
 
   // ── Overload ──
   if (webOverload && !prevOverload) {
@@ -513,8 +569,7 @@ if (prevDeviceConnected && !deviceOnline && systemOnline) {
   if (!activeDevice) { clearDisplay(); setDeviceBadge("idle"); return; }
   if (!systemOnline) { setDeviceBadge("unknown"); clearDisplay(); return; }
   if (!deviceOnline) { setDeviceBadge("offline"); clearDisplay(); return; }
-
-  if (!webOverload) setDeviceBadge("connected");
+  if (!webOverload)  setDeviceBadge("connected");
   updateDisplay();
 
   const t = new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -532,7 +587,6 @@ function startMetersInterval() {
 }
 
 // ================= INIT =================
-// Restore active session dari Firebase
 const savedActive = await loadActiveSession();
 if (savedActive && savedActive.id) {
   activeDevice        = { id: savedActive.id, name: savedActive.name };
