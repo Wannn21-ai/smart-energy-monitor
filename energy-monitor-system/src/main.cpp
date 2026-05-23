@@ -12,7 +12,8 @@
 // PIN DEFINITIONS
 // ================================================================
 #define PIN_LED_WIFI     2    // LED biru — WiFi status (onboard LED ESP32)
-#define PIN_LED_OVERLOAD 4    // LED merah — overload
+#define PIN_LED_GREEN    25   // LED RGB Green — sistem online / ESP32 on
+#define PIN_LED_RED      26   // LED RGB Red — overload
 #define PIN_BUZZER       5    // Buzzer — overload alert
 #define PIN_RESET_WIFI   0    // Tombol BOOT — hold 3 detik untuk reset WiFi
 
@@ -45,11 +46,11 @@ Preferences prefs;
 // ================================================================
 const float  TARIF_DEFAULT      = 1444.70f;
 const float  THRESHOLD_DEFAULT  = 2000.0f;  // Watt
-const unsigned long LOOP_INTERVAL         = 5000;   // ms — interval baca sensor
-const unsigned long RECONNECT_INTERVAL    = 60000;  // ms — reconnect WiFi
-const unsigned long THRESHOLD_SYNC_INTERVAL = 30000; // ms — sync threshold dari Firebase
-const unsigned long BUZZER_ON_MS          = 200;    // ms — durasi buzzer beep
-const unsigned long BUZZER_OFF_MS         = 300;    // ms — jeda antar beep
+const unsigned long LOOP_INTERVAL            = 5000;   // ms — interval baca sensor
+const unsigned long RECONNECT_INTERVAL       = 60000;  // ms — reconnect WiFi
+const unsigned long THRESHOLD_SYNC_INTERVAL  = 30000;  // ms — sync threshold dari Firebase
+const unsigned long BUZZER_ON_MS             = 200;    // ms — durasi buzzer beep
+const unsigned long BUZZER_OFF_MS            = 300;    // ms — jeda antar beep
 const int    BUZZER_BEEPS       = 3;
 
 // ================================================================
@@ -71,7 +72,7 @@ float sessionCost       = 0.0f;
 
 unsigned long lastLoopMs          = 0;
 unsigned long lastReconnectMs     = 0;
-unsigned long lastThresholdSyncMs = 0;  // FIX #4: track kapan terakhir sync threshold
+unsigned long lastThresholdSyncMs = 0;
 unsigned long lastBuzzerMs        = 0;
 int           buzzerBeepCount     = 0;
 bool          buzzerActive        = false;
@@ -91,13 +92,14 @@ bool  tryNTPSync();
 bool  sendToFirebase(float v, float i, float p, float pf, float freq,
                      float kwh, float cost, bool devConn, bool overload,
                      unsigned long ts);
-void  syncThresholdFromFirebase();  // FIX #4
+void  syncThresholdFromFirebase();
 void  oledSplash();
 void  oledStatus(const char* l1, const char* l2 = "");
 void  oledData(float v, float i, float p, float pf, float freq,
                float kwh, float cost, bool devConn, bool online, bool ovld);
 void  handleBuzzer();
 void  handleWifiLed();
+void  handleRgbLed();
 void  checkResetButton();
 void  loadPrefs();
 void  startWiFiManager();
@@ -120,17 +122,7 @@ void savePrefs() {
 }
 
 // ================================================================
-// FIX #4: syncThresholdFromFirebase
-// Baca threshold dari Firebase path yang ditulis oleh web settings.
-// Web menulis ke: users/{uid}/settings/overloadThreshold
-// Tapi untuk ESP32 yang tidak tahu UID, kita sediakan path publik:
-// /config/threshold.json yang bisa dibaca tanpa auth.
-//
-// CARA SETUP DI FIREBASE RULES:
-//   "config": { ".read": true, ".write": "auth != null" }
-//
-// Web perlu menulis ke /config/threshold setiap kali settings disimpan.
-// Lihat catatan di bawah untuk patch settings.js.
+// syncThresholdFromFirebase
 // ================================================================
 void syncThresholdFromFirebase() {
   if (!wifiConnected || WiFi.status() != WL_CONNECTED) return;
@@ -140,7 +132,6 @@ void syncThresholdFromFirebase() {
   client.setTimeout(8000);
   HTTPClient http;
 
-  // Baca threshold dari path publik
   String url = String(FIREBASE_HOST) + "/config/threshold.json";
   if (!http.begin(client, url)) {
     Serial.println("[Threshold Sync] http.begin() gagal");
@@ -152,7 +143,6 @@ void syncThresholdFromFirebase() {
   if (code == 200) {
     String payload = http.getString();
     payload.trim();
-    // Payload bisa berupa angka langsung: 2000 atau "null"
     if (payload != "null" && payload.length() > 0) {
       float newThreshold = payload.toFloat();
       if (newThreshold > 0 && newThreshold != overloadThreshold) {
@@ -378,7 +368,7 @@ void handleBuzzer() {
 }
 
 // ================================================================
-// LED WIFI
+// LED WiFi (PIN 2) — blink saat connecting, solid saat online
 // ================================================================
 void handleWifiLed() {
   if (wifiConnected && WiFi.status() == WL_CONNECTED) {
@@ -391,6 +381,19 @@ void handleWifiLed() {
     digitalWrite(PIN_LED_WIFI, blinkState);
     lastBlinkMs = now;
   }
+}
+
+// ================================================================
+// RGB LED
+// PIN_LED_GREEN (25) — menyala saat sistem online (WiFi + Firebase OK)
+// PIN_LED_RED   (26) — menyala saat overload terdeteksi
+// ================================================================
+void handleRgbLed() {
+  // Green: nyala jika WiFi terhubung
+  digitalWrite(PIN_LED_GREEN, (wifiConnected && WiFi.status() == WL_CONNECTED) ? HIGH : LOW);
+
+  // Red: nyala jika overload
+  digitalWrite(PIN_LED_RED, isOverload ? HIGH : LOW);
 }
 
 // ================================================================
@@ -467,7 +470,6 @@ void oledData(float v, float i, float p, float pf, float freq,
   display.setCursor(0, 23);
   display.printf("P:%.1fW  PF:%.2f", p, pf);
   display.setCursor(0, 33);
-  // FIX #4: Tampilkan threshold saat ini di OLED untuk debug
   display.printf("Hz:%.1f Thr:%.0fW", freq, overloadThreshold);
 
   display.drawLine(0, 43, 127, 43, WHITE);
@@ -489,13 +491,19 @@ void oledData(float v, float i, float p, float pf, float freq,
 void setup() {
   Serial.begin(115200);
 
-  pinMode(PIN_LED_WIFI,     OUTPUT);
-  pinMode(PIN_LED_OVERLOAD, OUTPUT);
-  pinMode(PIN_BUZZER,       OUTPUT);
-  pinMode(PIN_RESET_WIFI,   INPUT_PULLUP);
-  digitalWrite(PIN_LED_WIFI,     LOW);
-  digitalWrite(PIN_LED_OVERLOAD, LOW);
-  digitalWrite(PIN_BUZZER,       LOW);
+  pinMode(PIN_LED_WIFI,  OUTPUT);
+  pinMode(PIN_LED_GREEN, OUTPUT);
+  pinMode(PIN_LED_RED,   OUTPUT);
+  pinMode(PIN_BUZZER,    OUTPUT);
+  pinMode(PIN_RESET_WIFI, INPUT_PULLUP);
+
+  digitalWrite(PIN_LED_WIFI,  LOW);
+  digitalWrite(PIN_LED_GREEN, LOW);
+  digitalWrite(PIN_LED_RED,   LOW);
+  digitalWrite(PIN_BUZZER,    LOW);
+
+  // Nyalakan green seketika — tanda ESP32 sudah ON
+  digitalWrite(PIN_LED_GREEN, HIGH);
 
   pzemSerial.begin(9600, SERIAL_8N1, 16, 17);
   loadPrefs();
@@ -513,21 +521,24 @@ void setup() {
   wifiConnected = tryConnectWiFi(20);
 
   if (!wifiConnected) {
+    // Saat masuk WiFiManager, matikan green sementara (belum online)
+    digitalWrite(PIN_LED_GREEN, LOW);
     startWiFiManager();
   }
 
   if (wifiConnected) {
     WiFi.setSleep(false);
+    digitalWrite(PIN_LED_GREEN, HIGH); // WiFi OK → green solid
     oledStatus("WiFi OK", "Sync NTP...");
     ntpSynced = tryNTPSync();
     oledStatus("WiFi OK", ntpSynced ? "NTP Synced" : "NTP Gagal");
     delay(1500);
 
-    // FIX #4: Sync threshold dari Firebase segera setelah konek
     Serial.println("Initial threshold sync...");
     syncThresholdFromFirebase();
     Serial.printf("Threshold setelah sync: %.0f W\n", overloadThreshold);
   } else {
+    digitalWrite(PIN_LED_GREEN, LOW); // Offline → green mati
     oledStatus("Mode OFFLINE", "Retry in 60s");
     delay(2000);
     lastReconnectMs = millis();
@@ -546,6 +557,7 @@ void loop() {
   checkResetButton();
   handleWifiLed();
   handleBuzzer();
+  handleRgbLed(); // update RGB setiap loop
 
   // ── Reconnect logic ──
   if (!wifiConnected && now - lastReconnectMs >= RECONNECT_INTERVAL) {
@@ -555,7 +567,6 @@ void loop() {
     if (wifiConnected) {
       WiFi.setSleep(false);
       if (!ntpSynced) ntpSynced = tryNTPSync();
-      // FIX #4: Sync threshold setelah reconnect
       syncThresholdFromFirebase();
       oledStatus("WiFi Kembali!", "");
       delay(1000);
@@ -572,9 +583,7 @@ void loop() {
     digitalWrite(PIN_LED_WIFI, LOW);
   }
 
-  // ── FIX #4: Sync threshold dari Firebase setiap 30 detik ──
-  // Ini memungkinkan user ubah threshold di web settings dan
-  // ESP32 akan mengambilnya tanpa perlu restart.
+  // ── Sync threshold dari Firebase setiap 30 detik ──
   if (wifiConnected && (now - lastThresholdSyncMs >= THRESHOLD_SYNC_INTERVAL)) {
     lastThresholdSyncMs = now;
     syncThresholdFromFirebase();
@@ -617,9 +626,7 @@ void loop() {
     sessionCost      = sessionKwh * tarif;
   }
 
-  // ── FIX #4: Gunakan overloadThreshold yang sudah di-sync dari Firebase ──
   isOverload = deviceConnected && (power >= overloadThreshold);
-  digitalWrite(PIN_LED_OVERLOAD, isOverload ? HIGH : LOW);
 
   Serial.println("===========================");
   Serial.printf("WiFi     : %s\n", wifiConnected ? "Online" : "Offline");
@@ -627,9 +634,11 @@ void loop() {
   Serial.printf("V:%.1fV  I:%.2fA\n", voltage, current);
   Serial.printf("P:%.1fW  PF:%.2f  Hz:%.1f\n", power, pf, frequency);
   Serial.printf("E:%.4f kWh  Cost:Rp%.0f\n", sessionKwh, sessionCost);
-  // FIX #4: Log threshold yang sedang digunakan
   Serial.printf("Overload : %s (threshold:%.0fW, power:%.1fW)\n",
     isOverload ? "YES ⚠" : "no", overloadThreshold, power);
+  Serial.printf("RGB      : Green=%s  Red=%s\n",
+    (wifiConnected && WiFi.status() == WL_CONNECTED) ? "ON" : "OFF",
+    isOverload ? "ON" : "OFF");
 
   oledData(voltage, current, power, pf, frequency,
            sessionKwh, sessionCost, deviceConnected, wifiConnected, isOverload);
