@@ -325,9 +325,11 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
   json += "\"internet\":true,";
   json += "\"threshold\":"  + String(overloadThreshold, 0) + ",";
   json += "\"tarif\":"      + String(tarif, 2)             + ",";
-  json += "\"relay\":"      + (relay ? "true" : "false")   + "},";
-  json += "\"device\":{";
-  json += "\"connected\":"  + (devConn  ? "true" : "false") + ",";
+  
+  // SESUDAH (fix)
+json += "\"relay\":"     + String(relay    ? "true" : "false") + "},";
+json += "\"connected\":" + String(devConn  ? "true" : "false") + ",";
+json += "\"overload\":"  + String(overload ? "true" : "false") + "}}";
   json += "\"voltage\":"    + String(v,    1)               + ",";
   json += "\"current\":"    + String(i,    2)               + ",";
   json += "\"power\":"      + String(p,    1)               + ",";
@@ -336,7 +338,7 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
   json += "\"frequency\":"  + String(freq, 1)               + ",";
   json += "\"energy\":"     + String(kwh,  4)               + ",";
   json += "\"cost\":"       + String(cost, 0)               + ",";
-  json += "\"overload\":"   + (overload ? "true" : "false") + "}}";
+  json += "\"overload\":"  + String(overload ? "true" : "false") + "}}";
   int code = http.PUT(json);
   Serial.printf("Firebase: %d\n", code);
   http.end();
