@@ -58,6 +58,7 @@ let activeDevice = null, waitingForName = false, metersInterval = null;
 let energyBaseline = 0;
 let sessionCount = 0;
 let lastknownEnergy = 0;
+let prevSystemOnline = false;
 
 // ================= STORAGE (Firebase) =================
 async function getHistory() {
@@ -473,18 +474,27 @@ function updateMeters() {
   }
 
   // ── Device disconnect ──
-  if (prevDeviceConnected && !deviceOnline && systemOnline) {
-    deviceConnectTime   = null;
-    deviceConnectEnergy = 0;
-    if (waitingForName) {
-      closeModal(); showToast("Device dicabut sebelum diberi nama", "error");
-    } else if (isRunning && activeDevice) {
-      if (settings.notifDisconnect)
-        showToast(`Device "${activeDevice.name}" dicabut — sesi dihentikan`, "error");
-      saveSession().then(() => resetMonitoring());
-    }
+// ── System tiba-tiba offline (ESP32 dimatikan tanpa cabut device) ──
+if (prevSystemOnline && !systemOnline && isRunning && activeDevice) {
+  // Simpan sesi sebelum reset — ini yang hilang sebelumnya
+  if (settings.notifDisconnect)
+    showToast(`⚠ Sistem offline — sesi "${activeDevice.name}" disimpan`, "error");
+  saveSession().then(() => resetMonitoring());
+}
+prevSystemOnline = systemOnline;
+
+// ── Device disconnect (sistem masih online, device dicabut) ──
+if (prevDeviceConnected && !deviceOnline && systemOnline) {
+  deviceConnectTime   = null;
+  deviceConnectEnergy = 0;
+  if (waitingForName) {
+    closeModal(); showToast("Device dicabut sebelum diberi nama", "error");
+  } else if (isRunning && activeDevice) {
+    if (settings.notifDisconnect)
+      showToast(`Device "${activeDevice.name}" dicabut — sesi dihentikan`, "error");
+    saveSession().then(() => resetMonitoring());
   }
-  prevDeviceConnected = deviceOnline;
+}
 
   // ── Overload ──
   if (webOverload && !prevOverload) {

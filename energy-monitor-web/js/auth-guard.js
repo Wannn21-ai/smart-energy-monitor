@@ -381,7 +381,7 @@ export function startStatusWatcher() {
     const sys  = snapshot.val() || {};
     const now  = Math.floor(Date.now() / 1000);
     const diff = now - (sys.timestamp || 0);
-    setSystemStatus(sys.internet === true && sys.timestamp > 0 && diff <= 120);
+    setSystemStatus(sys.internet === true && sys.timestamp > 0 && diff <= 15);
   });
 }
 
