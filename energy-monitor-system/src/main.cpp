@@ -8,6 +8,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <PZEM004Tv30.h>
+#include <DNSServer.h>
 
 // ================================================================
 // PIN DEFINITIONS
@@ -26,6 +27,9 @@
 // LOCAL AP & WEBSERVER
 // AP selalu aktif (WIFI_AP_STA), webserver di 192.168.4.1
 // ================================================================
+DNSServer dnsServer;
+const byte DNS_PORT = 53;
+
 #define AP_SSID      "SEM-Config"
 #define AP_PASS      "12345678"
 WebServer localServer(80);
@@ -332,6 +336,8 @@ void startLocalAP() {
   IPAddress ip(192,168,4,1), sub(255,255,255,0);
   WiFi.softAPConfig(ip, ip, sub);
   WiFi.softAP(AP_SSID, AP_PASS);
+  dnsServer.stop();
+  dnsServer.start(DNS_PORT, "*", ip);
   Serial.printf("[AP] '%s' aktif — 192.168.4.1\n", AP_SSID);
 }
 
@@ -341,184 +347,400 @@ void startLocalAP() {
 // Tidak ada status sensor, tidak ada autentikasi
 // ================================================================
 void handleRoot() {
-  String html =
-    F("<!DOCTYPE html><html lang='id'><head>"
-      "<meta charset='UTF-8'/>"
-      "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'/>"
-      "<title>SEM Config</title><style>"
-      // Reset & base
-      "*{margin:0;padding:0;box-sizing:border-box}"
-      "body{background:#0a0a0a;color:#f0f0f0;"
-        "font-family:-apple-system,BlinkMacSystemFont,sans-serif;"
-        "padding:20px;max-width:440px;margin:0 auto;min-height:100vh}"
-      // Header
-      ".hdr{display:flex;align-items:center;gap:12px;"
-        "margin-bottom:24px;padding-bottom:16px;"
-        "border-bottom:1px solid rgba(255,255,255,0.06)}"
-      ".hdr-icon{width:38px;height:38px;background:rgba(0,229,255,0.1);"
-        "border:1px solid #00e5ff;border-radius:9px;"
-        "display:flex;align-items:center;justify-content:center;"
-        "font-size:20px;flex-shrink:0}"
-      ".hdr-t{font-size:15px;font-weight:700;color:#00e5ff;letter-spacing:.05em}"
-      ".hdr-s{font-size:11px;color:#444;margin-top:2px}"
-      // Card section
-      ".card{background:#111;border:1px solid rgba(255,255,255,0.06);"
-        "border-radius:14px;padding:18px;margin-bottom:14px}"
-      ".card-title{font-size:10px;font-weight:700;color:#444;"
-        "letter-spacing:.1em;text-transform:uppercase;"
-        "margin-bottom:16px;padding-bottom:10px;"
-        "border-bottom:1px solid rgba(255,255,255,0.04)}"
-      // Form elements
-      "label{display:block;font-size:11px;font-weight:600;color:#666;"
-        "text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
-      ".fg{margin-bottom:14px}"
-      ".fg:last-of-type{margin-bottom:0}"
-      "input{width:100%;padding:11px 14px;background:#1a1a1a;"
-        "border:1px solid rgba(255,255,255,0.08);border-radius:8px;"
-        "color:#f0f0f0;font-size:15px;outline:none;"
-        "-webkit-appearance:none;appearance:none}"
-      "input:focus{border-color:#00e5ff;"
-        "box-shadow:0 0 0 3px rgba(0,229,255,0.08)}"
-      "input::placeholder{color:#333}"
-      ".hint{font-size:11px;color:#3a3a3a;margin-top:6px;line-height:1.5}"
-      // Buttons
-      ".btn{display:block;width:100%;padding:12px;border:none;"
-        "border-radius:8px;font-size:14px;font-weight:700;"
-        "cursor:pointer;margin-top:16px;transition:opacity .15s}"
-      ".btn:active{opacity:.75}"
-      ".btn-primary{background:#00e5ff;color:#000}"
-      ".btn-ghost{background:transparent;color:#555;"
-        "border:1px solid rgba(255,255,255,0.09);margin-top:10px}"
-      // Toast notification
-      "#toast{position:fixed;bottom:20px;left:50%;"
-        "transform:translateX(-50%) translateY(60px);"
-        "background:#1a1a1a;border:1px solid rgba(255,255,255,0.12);"
-        "color:#f0f0f0;padding:11px 20px;border-radius:10px;"
-        "font-size:13px;font-weight:500;white-space:nowrap;"
-        "transition:transform .25s ease;pointer-events:none;z-index:99}"
-      "#toast.show{transform:translateX(-50%) translateY(0)}"
-      "#toast.ok{border-color:rgba(0,230,118,.35);color:#00e676}"
-      "#toast.err{border-color:rgba(255,23,68,.35);color:#ff1744}"
-      // Footer
-      ".footer{text-align:center;font-size:11px;color:#2a2a2a;"
-        "margin-top:20px;line-height:1.8}"
-      "</style></head><body>");
+  // Scan WiFi networks untuk dropdown
+  int n = WiFi.scanNetworks();
+  String ssidOptions = "";
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    int rssi    = WiFi.RSSI(i);
+    bool locked = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    // Signal bar: 4=kuat, 1=lemah
+    int bars = rssi > -50 ? 4 : rssi > -65 ? 3 : rssi > -75 ? 2 : 1;
+    String bar = bars == 4 ? "████" : bars == 3 ? "███░" : bars == 2 ? "██░░" : "█░░░";
+    ssidOptions += "<option value='" + ssid + "'>"
+                + bar + " " + ssid + (locked ? " 🔒" : "") + "</option>";
+  }
+  if (n == 0) ssidOptions = "<option value=''>Tidak ada jaringan ditemukan</option>";
+
+  String html = "<!DOCTYPE html><html lang='id'><head>"
+    "<meta charset='UTF-8'/>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'/>"
+    "<title>Smart Energy Monitor · Setup</title>"
+    "<style>"
+    // ── Reset ──
+    "*{margin:0;padding:0;box-sizing:border-box}"
+    "body{background:#0a0a0a;color:#f0f0f0;"
+      "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+      "min-height:100vh;display:flex;flex-direction:column;"
+      "align-items:center;justify-content:flex-start;padding:24px 16px}"
+    // ── Header ──
+    ".hdr{width:100%;max-width:420px;display:flex;align-items:center;gap:14px;"
+      "margin-bottom:28px}"
+    ".hdr-icon{width:44px;height:44px;flex-shrink:0;"
+      "background:rgba(0,229,255,0.08);border:1.5px solid #00e5ff;"
+      "border-radius:12px;display:flex;align-items:center;"
+      "justify-content:center;font-size:22px}"
+    ".hdr-title{font-size:17px;font-weight:700;color:#00e5ff;letter-spacing:.04em}"
+    ".hdr-sub{font-size:12px;color:#444;margin-top:3px}"
+    // ── Step indicator ──
+    ".steps{width:100%;max-width:420px;display:flex;"
+      "align-items:center;margin-bottom:28px;gap:0}"
+    ".step{display:flex;flex-direction:column;align-items:center;flex:1}"
+    ".step-dot{width:28px;height:28px;border-radius:50%;"
+      "display:flex;align-items:center;justify-content:center;"
+      "font-size:11px;font-weight:700;transition:all .3s}"
+    ".step-dot.done{background:#00e5ff;color:#000}"
+    ".step-dot.active{background:rgba(0,229,255,0.15);"
+      "border:1.5px solid #00e5ff;color:#00e5ff}"
+    ".step-dot.pending{background:#1a1a1a;border:1px solid #2a2a2a;color:#444}"
+    ".step-label{font-size:9px;color:#444;margin-top:4px;"
+      "text-transform:uppercase;letter-spacing:.06em;text-align:center}"
+    ".step-line{flex:1;height:1px;background:#1a1a1a;margin-top:-14px}"
+    // ── Card ──
+    ".card{background:#111;border:1px solid rgba(255,255,255,0.07);"
+      "border-radius:18px;padding:22px;width:100%;max-width:420px;"
+      "margin-bottom:14px}"
+    ".card-title{font-size:10px;font-weight:700;color:#444;"
+      "letter-spacing:.1em;text-transform:uppercase;"
+      "margin-bottom:18px;padding-bottom:12px;"
+      "border-bottom:1px solid rgba(255,255,255,0.04);"
+      "display:flex;align-items:center;gap:8px}"
+    // ── Form ──
+    ".fg{margin-bottom:18px}"
+    ".fg:last-of-type{margin-bottom:0}"
+    "label{display:block;font-size:11px;font-weight:600;color:#666;"
+      "text-transform:uppercase;letter-spacing:.06em;margin-bottom:7px}"
+    ".hint{font-size:11px;color:#333;margin-top:5px;line-height:1.6}"
+    "select,input[type=text],input[type=password],input[type=number]{"
+      "width:100%;padding:12px 14px;"
+      "background:#1a1a1a;border:1px solid rgba(255,255,255,0.08);"
+      "border-radius:10px;color:#f0f0f0;font-size:15px;outline:none;"
+      "-webkit-appearance:none;appearance:none;"
+      "transition:border-color .2s,box-shadow .2s}"
+    "select:focus,input:focus{"
+      "border-color:#00e5ff;box-shadow:0 0 0 3px rgba(0,229,255,0.08)}"
+    "select option{background:#1a1a1a;color:#f0f0f0}"
+    "input::placeholder{color:#2a2a2a}"
+    // ── Input row (value + unit) ──
+    ".input-row{display:flex;gap:10px;align-items:flex-end}"
+    ".input-row input{flex:1}"
+    ".input-unit{font-size:13px;color:#555;padding-bottom:14px;white-space:nowrap}"
+    // ── Converted preview ──
+    ".converted{font-size:12px;color:#555;margin-top:6px;min-height:18px;transition:color .2s}"
+    ".converted.active{color:#00e5ff}"
+    // ── Buttons ──
+    ".btn{display:block;width:100%;padding:14px;"
+      "border:none;border-radius:12px;"
+      "font-size:15px;font-weight:700;cursor:pointer;"
+      "transition:opacity .15s,transform .1s;letter-spacing:.02em}"
+    ".btn:active{opacity:.8;transform:scale(.98)}"
+    ".btn-primary{background:#00e5ff;color:#000}"
+    ".btn-ghost{background:transparent;color:#555;"
+      "border:1px solid rgba(255,255,255,0.08);margin-top:10px}"
+    ".btn:disabled{opacity:.4;cursor:not-allowed}"
+    // ── Status badge ──
+    ".badge{display:inline-flex;align-items:center;gap:6px;"
+      "padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600}"
+    ".badge-online{background:rgba(0,230,118,0.12);"
+      "border:1px solid rgba(0,230,118,0.3);color:#00e676}"
+    ".badge-offline{background:rgba(255,171,0,0.10);"
+      "border:1px solid rgba(255,171,0,0.3);color:#ffab00}"
+    // ── Toast ──
+    "#toast{position:fixed;bottom:24px;left:50%;"
+      "transform:translateX(-50%) translateY(80px);opacity:0;"
+      "background:#1a1a1a;border:1px solid rgba(255,255,255,0.1);"
+      "color:#f0f0f0;padding:12px 20px;border-radius:12px;"
+      "font-size:13px;font-weight:500;white-space:nowrap;"
+      "transition:transform .3s ease,opacity .3s ease;z-index:999}"
+    "#toast.show{transform:translateX(-50%) translateY(0);opacity:1}"
+    "#toast.ok{border-color:rgba(0,230,118,.4);color:#00e676}"
+    "#toast.err{border-color:rgba(255,23,68,.4);color:#ff1744}"
+    "#toast.info{border-color:rgba(0,229,255,.4);color:#00e5ff}"
+    // ── Spinner ──
+    ".spin{display:inline-block;width:16px;height:16px;"
+      "border:2px solid rgba(0,0,0,.2);border-top-color:#000;"
+      "border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle}"
+    "@keyframes spin{to{transform:rotate(360deg)}}"
+    // ── Footer ──
+    ".footer{width:100%;max-width:420px;text-align:center;"
+      "font-size:11px;color:#2a2a2a;margin-top:16px;line-height:2}"
+    // ── Current values chip ──
+    ".chip{display:inline-flex;align-items:center;gap:6px;"
+      "background:#1a1a1a;border:1px solid rgba(255,255,255,0.06);"
+      "border-radius:20px;padding:4px 12px;font-size:11px;color:#555;"
+      "font-family:monospace;margin-top:6px}"
+    ".chip span{color:#00e5ff}"
+    "</style></head><body>";
 
   // ── Header ─────────────────────────────────────────────────
-  html += F("<div class='hdr'>"
+  html += "<div class='hdr'>"
     "<div class='hdr-icon'>⚡</div>"
     "<div>"
-      "<div class='hdr-t'>SEM · Config</div>"
-      "<div class='hdr-s'>Smart Energy Monitor</div>"
+      "<div class='hdr-title'>Smart Energy Monitor</div>"
+      "<div class='hdr-sub'>Konfigurasi perangkat · SEM v3.0</div>"
     "</div>"
-    "</div>");
+    "</div>";
+
+  // ── Step indicator ─────────────────────────────────────────
+  html += "<div class='steps'>"
+    "<div class='step'>"
+      "<div class='step-dot active'>1</div>"
+      "<div class='step-label'>WiFi</div>"
+    "</div>"
+    "<div class='step-line'></div>"
+    "<div class='step'>"
+      "<div class='step-dot pending'>2</div>"
+      "<div class='step-label'>Tarif</div>"
+    "</div>"
+    "<div class='step-line'></div>"
+    "<div class='step'>"
+      "<div class='step-dot pending'>3</div>"
+      "<div class='step-label'>Selesai</div>"
+    "</div>"
+    "</div>";
 
   // ── Card 1: WiFi ───────────────────────────────────────────
-  html += F("<div class='card'>"
-    "<div class='card-title'>Konfigurasi WiFi</div>"
+  html += "<div class='card' id='card-wifi'>"
+    "<div class='card-title'>📶 &nbsp;Koneksi WiFi</div>"
     "<div class='fg'>"
-      "<label>Nama WiFi (SSID)</label>"
-      "<input type='text' id='ssid' placeholder='Nama jaringan WiFi' autocomplete='off' spellcheck='false'/>"
+      "<label>Pilih Jaringan WiFi</label>"
+      "<select id='ssid'>" + ssidOptions + "</select>"
+      "<div class='hint'>Tidak ada? &nbsp;"
+        "<a href='#' onclick='manualSSID()' "
+          "style='color:#00e5ff;text-decoration:none;'>Ketik manual ↓</a></div>"
+    "</div>"
+    "<div class='fg' id='manual-wrap' style='display:none'>"
+      "<label>Nama WiFi (Manual)</label>"
+      "<input type='text' id='ssid-manual' placeholder='Ketik nama WiFi' "
+        "autocomplete='off' spellcheck='false'/>"
     "</div>"
     "<div class='fg'>"
-      "<label>Password</label>"
-      "<input type='password' id='wpass' placeholder='Password WiFi' autocomplete='new-password'/>"
+      "<label>Password WiFi</label>"
+      "<input type='password' id='wpass' placeholder='••••••••' "
+        "autocomplete='new-password'/>"
     "</div>"
-    "<div class='hint'>ESP32 akan mencoba terhubung. Halaman ini tetap bisa diakses setelah berhasil.</div>"
-    "<button class='btn btn-primary' onclick='connectWifi()'>Hubungkan WiFi</button>"
-    "</div>");
+    "<button class='btn btn-primary' id='btn-wifi' onclick='step1()'>Hubungkan &rarr;</button>"
+    "</div>";
 
-  // ── Card 2: Threshold & Tarif ──────────────────────────────
-  html += F("<div class='card'>"
-    "<div class='card-title'>Pengaturan</div>"
+  // ── Card 2: Pengaturan (hidden until WiFi OK) ──────────────
+  html += "<div class='card' id='card-settings' style='display:none'>"
+    "<div class='card-title'>⚙ &nbsp;Pengaturan Energi</div>"
     "<div class='fg'>"
-      "<label>Batas Overload (Watt)</label>"
-      "<input type='number' id='thr' min='100' max='10000' step='100' placeholder='2000'/>"
-      "<div class='hint'>Relay mati otomatis jika daya melebihi nilai ini.</div>"
+      "<label>Tarif per kWh</label>"
+      "<div class='input-row'>"
+        "<input type='number' id='trf' min='0' step='0.01' "
+          "placeholder='1444.70' value='" + String(tarif, 2) + "'/>"
+        "<span class='input-unit'>IDR</span>"
+      "</div>"
+      "<div class='converted' id='trf-preview'></div>"
+      "<div class='chip'>Tersimpan: <span>" + String(tarif, 2) + " IDR/kWh</span></div>"
     "</div>"
     "<div class='fg'>"
-      "<label>Tarif per kWh (Rp)</label>"
-      "<input type='number' id='trf' min='0' step='0.01' placeholder='1444.70'/>"
-      "<div class='hint'>Untuk kalkulasi estimasi biaya sesi.</div>"
+      "<label>Batas Overload</label>"
+      "<div class='input-row'>"
+        "<input type='number' id='thr' min='100' max='10000' step='100' "
+          "placeholder='2000' value='" + String(overloadThreshold, 0) + "'/>"
+        "<span class='input-unit'>Watt</span>"
+      "</div>"
+      "<div class='hint'>Relay mati otomatis jika daya perangkat melebihi nilai ini.</div>"
+      "<div class='chip'>Tersimpan: <span>" + String(overloadThreshold, 0) + " W</span></div>"
     "</div>"
-    "<button class='btn btn-primary' onclick='saveSettings()'>Simpan Pengaturan</button>"
-    "</div>");
-
-  // ── Card 3: Reset WiFi ─────────────────────────────────────
-  html += F("<div class='card'>"
-    "<div class='card-title'>Reset</div>"
-    "<div class='hint' style='margin-bottom:4px'>"
-      "Hapus semua konfigurasi WiFi tersimpan dan restart ESP32."
-    "</div>"
-    "<button class='btn btn-ghost' "
-      "onclick=\"if(confirm('Yakin? Semua konfigurasi WiFi akan dihapus.'))resetWifi()\">"
-      "Reset WiFi &amp; Restart"
+    "<button class='btn btn-primary' id='btn-save' onclick='step2()'>"
+      "Simpan &amp; Selesai ✓"
     "</button>"
-    "</div>");
+    "<button class='btn btn-ghost' onclick='skipSettings()'>"
+      "Lewati (gunakan nilai sekarang)"
+    "</button>"
+    "</div>";
+
+  // ── Card 3: Done (hidden) ──────────────────────────────────
+  html += "<div class='card' id='card-done' style='display:none;text-align:center'>"
+    "<div style='font-size:48px;margin-bottom:16px'>✅</div>"
+    "<div style='font-size:16px;font-weight:700;color:#00e676;margin-bottom:8px'>"
+      "Konfigurasi Selesai!</div>"
+    "<div style='font-size:13px;color:#555;line-height:1.8;margin-bottom:20px'>"
+      "ESP32 berhasil terhubung ke WiFi.<br>"
+      "Pengaturan tarif &amp; threshold tersimpan.<br>"
+      "Dashboard web kini aktif.</div>"
+    "<div id='done-ip' style='font-family:monospace;font-size:13px;"
+      "background:#1a1a1a;border:1px solid rgba(0,229,255,.2);"
+      "border-radius:8px;padding:12px;color:#00e5ff;margin-bottom:20px'>"
+      "Menghubungkan...</div>"
+    "<button class='btn btn-ghost' onclick='resetWifi()' "
+      "style='max-width:200px;margin:0 auto'>"
+      "Reset &amp; Ulangi</button>"
+    "</div>";
 
   // ── Footer ─────────────────────────────────────────────────
-  html += F("<div class='footer'>"
+  html += "<div class='footer'>"
     "SEM-Config &nbsp;·&nbsp; 192.168.4.1<br>"
-    "pw: 12345678"
-    "</div>");
+    "Hubungkan ke WiFi <b>SEM-Config</b> &nbsp;·&nbsp; pw: <b>12345678</b>"
+    "</div>";
 
-  // ── Toast element ──────────────────────────────────────────
-  html += F("<div id='toast'></div>");
+  // ── Toast ──────────────────────────────────────────────────
+  html += "<div id='toast'></div>";
 
   // ── JavaScript ─────────────────────────────────────────────
-  html += F("<script>");
+  html += R"JS(<script>
+var _tt, wifiOk = false;
 
-  // Isi input dengan nilai saat ini dari flash
-  html += "document.getElementById('thr').value=" + String(overloadThreshold, 0) + ";";
-  html += "document.getElementById('trf').value=" + String(tarif, 2) + ";";
+// ── Toast ──
+function toast(msg, type) {
+  var el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = type || '';
+  el.classList.add('show');
+  clearTimeout(_tt);
+  _tt = setTimeout(function() { el.classList.remove('show'); }, 4000);
+}
 
-  // Fungsi toast
-  html += F(
-    "var _tt;"
-    "function toast(msg,type){"
-      "var el=document.getElementById('toast');"
-      "el.textContent=msg;"
-      "el.className=type||'';"
-      "el.classList.add('show');"
-      "clearTimeout(_tt);"
-      "_tt=setTimeout(function(){el.classList.remove('show');},3500);"
-    "}"
+// ── Converted preview (IDR → USD) ──
+var USD_RATE = 16500;
+document.getElementById('trf').addEventListener('input', function() {
+  var v = parseFloat(this.value);
+  var el = document.getElementById('trf-preview');
+  if (!isNaN(v) && v > 0) {
+    el.textContent = '≈ $ ' + (v / USD_RATE).toFixed(4) + ' / kWh';
+    el.className = 'converted active';
+  } else {
+    el.textContent = '';
+    el.className = 'converted';
+  }
+});
 
-    // Simpan threshold + tarif → /save
-    "function saveSettings(){"
-      "var thr=parseFloat(document.getElementById('thr').value);"
-      "var trf=parseFloat(document.getElementById('trf').value);"
-      "if(isNaN(thr)||thr<100||thr>10000){toast('Threshold harus 100–10000 W','err');return;}"
-      "if(isNaN(trf)||trf<=0){toast('Tarif harus lebih dari 0','err');return;}"
-      "fetch('/save?thr='+thr+'&trf='+trf)"
-        ".then(function(r){return r.text();})"
-        ".then(function(t){toast(t,'ok');})"
-        ".catch(function(){toast('Gagal menyimpan — coba lagi','err');});"
-    "}"
+// ── Manual SSID toggle ──
+function manualSSID() {
+  var w = document.getElementById('manual-wrap');
+  w.style.display = w.style.display === 'none' ? 'block' : 'none';
+  if (w.style.display !== 'none')
+    document.getElementById('ssid-manual').focus();
+}
 
-    // Connect WiFi → /connectwifi
-    "function connectWifi(){"
-      "var ssid=document.getElementById('ssid').value.trim();"
-      "var pass=document.getElementById('wpass').value;"
-      "if(!ssid){toast('SSID tidak boleh kosong','err');return;}"
-      "toast('Menghubungkan ke \"'+ssid+'\"...','');"
-      "fetch('/connectwifi?ssid='+encodeURIComponent(ssid)+'&pass='+encodeURIComponent(pass))"
-        ".then(function(r){return r.text();})"
-        ".then(function(t){"
-          "toast(t, t.indexOf('Berhasil')>=0?'ok':'err');"
-        "})"
-        ".catch(function(){toast('Tidak ada respons — ESP32 sedang mencoba connect','err');});"
-    "}"
+// ── Step 1: Connect WiFi ──
+function step1() {
+  var ssidSel = document.getElementById('ssid').value;
+  var ssidMan = document.getElementById('ssid-manual').value.trim();
+  var ssid = (document.getElementById('manual-wrap').style.display !== 'none' && ssidMan)
+    ? ssidMan : ssidSel;
+  var pass = document.getElementById('wpass').value;
+  if (!ssid) { toast('Pilih atau ketik nama WiFi terlebih dahulu', 'err'); return; }
 
-    // Reset WiFi → /resetwifi
-    "function resetWifi(){"
-      "fetch('/resetwifi')"
-        ".then(function(){toast('WiFi direset — ESP32 akan restart...','ok');});"
-    "}"
-  );
+  var btn = document.getElementById('btn-wifi');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>  Menghubungkan...';
+  toast('Mencoba terhubung ke "' + ssid + '"...', 'info');
 
-  html += F("</script></body></html>");
+  // Step dots
+  document.querySelectorAll('.step-dot')[0].className = 'step-dot done';
+  document.querySelectorAll('.step-dot')[0].textContent = '✓';
+  document.querySelectorAll('.step-dot')[1].className = 'step-dot active';
 
+  fetch('/connectwifi?ssid=' + encodeURIComponent(ssid) + '&pass=' + encodeURIComponent(pass))
+    .then(function(r) { return r.text(); })
+    .then(function(t) {
+      if (t.indexOf('Berhasil') >= 0) {
+        wifiOk = true;
+        toast('✓ ' + t, 'ok');
+        document.getElementById('card-settings').style.display = 'block';
+        document.getElementById('card-settings').scrollIntoView({ behavior: 'smooth' });
+        btn.innerHTML = '✓ Terhubung';
+        btn.style.background = 'rgba(0,230,118,0.15)';
+        btn.style.color = '#00e676';
+        btn.style.border = '1px solid rgba(0,230,118,0.3)';
+      } else {
+        toast('✗ ' + t, 'err');
+        btn.disabled = false;
+        btn.innerHTML = 'Coba Lagi';
+        document.querySelectorAll('.step-dot')[0].className = 'step-dot active';
+        document.querySelectorAll('.step-dot')[0].textContent = '1';
+        document.querySelectorAll('.step-dot')[1].className = 'step-dot pending';
+      }
+    })
+    .catch(function() {
+      toast('Tidak ada respons — ESP32 sedang mencoba connect', 'err');
+      btn.disabled = false;
+      btn.innerHTML = 'Coba Lagi';
+      document.querySelectorAll('.step-dot')[0].className = 'step-dot active';
+      document.querySelectorAll('.step-dot')[0].textContent = '1';
+      document.querySelectorAll('.step-dot')[1].className = 'step-dot pending';
+    });
+}
+
+// ── Step 2: Save settings ──
+function step2() {
+  var thr = parseFloat(document.getElementById('thr').value);
+  var trf = parseFloat(document.getElementById('trf').value);
+  if (isNaN(thr) || thr < 100 || thr > 10000) {
+    toast('Threshold harus antara 100–10000 Watt', 'err'); return;
+  }
+  if (isNaN(trf) || trf <= 0) {
+    toast('Masukkan tarif yang valid', 'err'); return;
+  }
+  var btn = document.getElementById('btn-save');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>  Menyimpan...';
+
+  fetch('/save?thr=' + thr + '&trf=' + trf)
+    .then(function(r) { return r.text(); })
+    .then(function(t) {
+      if (t.indexOf('Tersimpan') >= 0) {
+        showDone();
+      } else {
+        toast('Gagal menyimpan: ' + t, 'err');
+        btn.disabled = false;
+        btn.innerHTML = 'Simpan & Selesai ✓';
+      }
+    })
+    .catch(function() {
+      toast('Gagal — coba lagi', 'err');
+      btn.disabled = false;
+      btn.innerHTML = 'Simpan & Selesai ✓';
+    });
+}
+
+function skipSettings() {
+  showDone();
+}
+
+// ── Show done card ──
+function showDone() {
+  document.getElementById('card-settings').style.display = 'none';
+  document.getElementById('card-done').style.display = 'block';
+  document.querySelectorAll('.step-dot')[1].className = 'step-dot done';
+  document.querySelectorAll('.step-dot')[1].textContent = '✓';
+  document.querySelectorAll('.step-dot')[2].className = 'step-dot done';
+  document.querySelectorAll('.step-dot')[2].textContent = '✓';
+  document.getElementById('card-done').scrollIntoView({ behavior: 'smooth' });
+  // Poll IP
+  setTimeout(function() {
+    fetch('/status').then(function(r) { return r.json(); })
+      .then(function(d) {
+        document.getElementById('done-ip').innerHTML =
+          'IP: <b>' + (d.ip || '—') + '</b><br>' +
+          'Dashboard: <a href="https://smart-energy-monitoring.netlify.app" ' +
+          'style="color:#00e5ff">smart-energy-monitoring.netlify.app</a>';
+      }).catch(function() {
+        document.getElementById('done-ip').textContent = 'Konfigurasi tersimpan ✓';
+      });
+  }, 1500);
+}
+
+// ── Reset WiFi ──
+function resetWifi() {
+  if (!confirm('Reset semua konfigurasi WiFi dan mulai ulang?')) return;
+  fetch('/resetwifi').then(function() {
+    toast('Mereset... ESP32 akan restart', 'info');
+  });
+}
+
+// ── Enter key support ──
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Enter') return;
+  if (!wifiOk) step1(); else step2();
+});
+</script>)JS";
+
+  html += "</body></html>";
   localServer.send(200, "text/html; charset=utf-8", html);
 }
 
@@ -607,14 +829,60 @@ void handleNotFound() {
   localServer.send(404, "text/plain", "404 Not Found");
 }
 
+// Handler: status JSON (untuk halaman done)
+void handleStatus() {
+  String ip = wifiConnected ? WiFi.localIP().toString() : "—";
+  String json = "{\"wifi\":" + String(wifiConnected ? "true":"false") +
+                ",\"ip\":\"" + ip + "\""
+                ",\"threshold\":" + String(overloadThreshold,0) +
+                ",\"tarif\":" + String(tarif,2) + "}";
+  localServer.send(200, "application/json", json);
+}
+
+// Handler captive portal — redirect semua URL asing ke root
+// Browser (Android/iOS/Windows) mendeteksi redirect ini sebagai captive portal
+void handleCaptivePortal() {
+  localServer.sendHeader("Location", "http://192.168.4.1/", true);
+  localServer.send(302, "text/plain", "");
+}
+
+// Handler: Apple CNA (Captive Network Assistant)
+void handleAppleCNA() {
+  // iOS/macOS mengecek URL ini — jika bukan "Success" maka buka portal
+  localServer.send(200, "text/html",
+    "<HTML><HEAD><TITLE>Success</TITLE></HEAD>"
+    "<BODY>Success</BODY></HTML>");
+}
+
 void setupWebServer() {
-  localServer.on("/",            HTTP_GET, handleRoot);
+  // Halaman utama
+  localServer.on("/",                HTTP_GET, handleRoot);
+  localServer.on("/index.html",      HTTP_GET, handleRoot);
+
+  // Apple Captive Network Assistant endpoints
+  localServer.on("/hotspot-detect.html",   HTTP_GET, handleAppleCNA);
+  localServer.on("/library/test/success.html", HTTP_GET, handleAppleCNA);
+  localServer.on("/success.txt",           HTTP_GET, handleAppleCNA);
+
+  // Android / Windows captive portal check endpoints
+  localServer.on("/generate_204",     HTTP_GET, handleCaptivePortal);
+  localServer.on("/gen_204",          HTTP_GET, handleCaptivePortal);
+  localServer.on("/redirect",         HTTP_GET, handleCaptivePortal);
+  localServer.on("/hotspot",          HTTP_GET, handleCaptivePortal);
+  localServer.on("/ncsi.txt",         HTTP_GET, handleCaptivePortal);
+  localServer.on("/connecttest.txt",  HTTP_GET, handleCaptivePortal);
+
+  // Fungsional
   localServer.on("/save",        HTTP_GET, handleSave);
   localServer.on("/connectwifi", HTTP_GET, handleConnectWifi);
   localServer.on("/resetwifi",   HTTP_GET, handleResetWifi);
-  localServer.onNotFound(handleNotFound);
+  localServer.on("/status",      HTTP_GET, handleStatus);
+
+  // Catch-all: redirect semua URL yang tidak dikenal ke root (captive portal)
+  localServer.onNotFound(handleCaptivePortal);
+
   localServer.begin();
-  Serial.println("[LocalWeb] Server aktif di http://192.168.4.1");
+  Serial.println("[LocalWeb] Captive portal aktif di http://192.168.4.1");
 }
 
 // ================================================================
@@ -928,6 +1196,7 @@ void loop() {
 
   // ── Webserver handle client ────────────────────────────────
   localServer.handleClient();
+  dnsServer.processNextRequest();
 
   checkResetButton();
   handleBlueLed();
