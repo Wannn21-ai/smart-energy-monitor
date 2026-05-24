@@ -4,6 +4,7 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFiManager.h>
+#include <WebServer.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <PZEM004Tv30.h>
@@ -11,16 +12,23 @@
 // ================================================================
 // PIN DEFINITIONS
 // ================================================================
-#define PIN_LED_WIFI     2    // LED biru  — WiFi status
-#define PIN_LED_GREEN    25   // RGB Green — sistem online
-#define PIN_LED_RED      26   // RGB Red   — overload
-#define PIN_BUZZER       5    // Buzzer    — overload alert
-#define PIN_RELAY        27   // Relay     — kontrol stopkontak (Active LOW)
-#define PIN_RESET_WIFI   0    // Tombol BOOT — hold 3 detik reset WiFi
+#define PIN_LED_BLUE    2    // LED Biru  — WiFi status
+#define PIN_LED_GREEN   25   // LED Hijau — device connected (V>0, I>0)
+#define PIN_LED_RED     26   // LED Merah — overload (sinkron buzzer)
+#define PIN_BUZZER      5    // Buzzer    — overload (sinkron LED merah)
+#define PIN_RELAY       27   // Relay     — kontrol stopkontak (Active LOW)
+#define PIN_RESET_WIFI  0    // Tombol BOOT — hold 3 detik reset WiFi
 
-// Active LOW: LOW=ON (listrik mengalir), HIGH=OFF (terputus)
-#define RELAY_ON  LOW
-#define RELAY_OFF HIGH
+#define RELAY_ON   LOW
+#define RELAY_OFF  HIGH
+
+// ================================================================
+// LOCAL AP & WEBSERVER
+// AP selalu aktif (WIFI_AP_STA), webserver di 192.168.4.1
+// ================================================================
+#define AP_SSID      "SEM-Config"
+#define AP_PASS      "12345678"
+WebServer localServer(80);
 
 // ================================================================
 // OLED
@@ -49,66 +57,89 @@ Preferences prefs;
 // ================================================================
 // KONSTANTA
 // ================================================================
-const float  TARIF_DEFAULT            = 1444.70f;
-const float  THRESHOLD_DEFAULT        = 2000.0f;
+const float  TARIF_DEFAULT     = 1444.70f;
+const float  THRESHOLD_DEFAULT = 2000.0f;
+
 const unsigned long LOOP_INTERVAL           = 5000;
 const unsigned long RECONNECT_INTERVAL      = 60000;
 const unsigned long THRESHOLD_SYNC_INTERVAL = 30000;
 const unsigned long COMMAND_POLL_INTERVAL   = 2000;
-const unsigned long BUZZER_ON_MS            = 200;
-const unsigned long BUZZER_OFF_MS           = 300;
-const int    BUZZER_BEEPS             = 3;
+const unsigned long OVERLOAD_BLINK_MS       = 200;
+// LED/Buzzer tetap blink N detik setelah relay mati karena overload
+const unsigned long OVERLOAD_ALERT_LINGER   = 10000;
+
+// Device dianggap dicabut setelah N pembacaan berturutan I<0.01 & P<0.5
+const int DISCONNECT_THRESHOLD = 2;
 
 // ================================================================
-// GLOBAL STATE
+// STATE — SISTEM
 // ================================================================
-bool  wifiConnected   = false;
-bool  ntpSynced       = false;
+bool wifiConnected = false;
+bool ntpSynced     = false;
+bool modeOffline   = false;
+unsigned long offlineStartMs = 0;
+
+// ================================================================
+// STATE — SENSOR & RELAY
+// ================================================================
+bool  relayOn         = false;
 bool  deviceConnected = false;
-bool  isOverload      = false;
 bool  prevDevConn     = false;
-bool  relayOn         = false; // BOOT: relay OFF, tunggu perintah web
+bool  isOverload      = false;
+int   disconnectCount = 0;
 
+// Overload alert linger: LED+Buzzer tetap berkedip setelah relay mati
+bool          overloadAlertLinger = false;
+unsigned long overloadLingerStart = 0;
+
+// ================================================================
+// STATE — AKUMULASI ENERGI
+// ================================================================
 float overloadThreshold = THRESHOLD_DEFAULT;
 float tarif             = TARIF_DEFAULT;
 float sessionEnergyWh   = 0.0f;
 float sessionKwh        = 0.0f;
 float sessionCost       = 0.0f;
+bool  sessionActive     = false;
 
+// Snapshot sensor terakhir yang valid (untuk OLED offline)
+float lastV = 0, lastI = 0, lastP = 0, lastPF = 0, lastHz = 0;
+bool  hadDataOnce = false;
+
+// ================================================================
+// TIMING
+// ================================================================
 unsigned long lastLoopMs          = 0;
 unsigned long lastReconnectMs     = 0;
 unsigned long lastThresholdSyncMs = 0;
 unsigned long lastCommandPollMs   = 0;
-unsigned long lastBuzzerMs        = 0;
-int           buzzerBeepCount     = 0;
-bool          buzzerActive        = false;
-bool          buzzerState         = false;
+
+// LED timing
 unsigned long lastBlinkMs         = 0;
 bool          blinkState          = false;
+unsigned long lastOverloadBlinkMs = 0;
+bool          overloadBlinkState  = false;
 
 // ================================================================
 // FORWARD DECLARATIONS
 // ================================================================
-bool tryConnectWiFi(int timeoutSeconds = 20);
-bool tryNTPSync();
+void loadPrefs(); void savePrefs();
+void saveSessionToPrefs(); void loadSessionFromPrefs(); void clearSessionPrefs();
+bool tryConnectWiFi(int sec = 20); bool tryNTPSync();
+void startLocalAP(); void setupWebServer(); void startWiFiManager();
+void setRelay(bool on, const char* reason = "");
+void handleDeviceDisconnect(); void handleOverload(float power);
 bool sendToFirebase(float v, float i, float p, float pf, float freq,
-                    float kwh, float cost, bool devConn, bool overload,
+                    float kwh, float cost, bool dev, bool ovl,
                     bool relay, unsigned long ts);
-void syncThresholdFromFirebase();
-void pollCommandFromFirebase();
+void syncThresholdFromFirebase(); void pollCommandFromFirebase();
 void clearFirebaseCommand();
-void setRelay(bool on);
-void oledSplash();
-void oledStatus(const char* l1, const char* l2 = "");
-void oledData(float v, float i, float p, float pf, float freq,
-              float kwh, float cost, bool devConn, bool online, bool ovld, bool relay);
-void handleBuzzer();
-void handleWifiLed();
-void handleRgbLed();
+void handleBlueLed(); void handleGreenLed(); void handleOverloadAlert();
 void checkResetButton();
-void loadPrefs();
-void savePrefs();
-void startWiFiManager();
+void oledSplash(); void oledStatus(const char* l1, const char* l2 = "");
+void oledData(float v, float i, float p, float pf, float hz, float kwh,
+              float cost, bool dev, bool online, bool ovl, bool relay,
+              bool offline, unsigned long offMs);
 
 // ================================================================
 // PREFERENCES
@@ -125,173 +156,539 @@ void savePrefs() {
   prefs.putFloat("tarif",     tarif);
   prefs.end();
 }
+void saveSessionToPrefs() {
+  prefs.begin("session", false);
+  prefs.putFloat("energyWh", sessionEnergyWh);
+  prefs.putFloat("kwh",      sessionKwh);
+  prefs.putFloat("cost",     sessionCost);
+  prefs.putFloat("lastV",    lastV);
+  prefs.putFloat("lastI",    lastI);
+  prefs.putFloat("lastP",    lastP);
+  prefs.putBool ("hadData",  hadDataOnce);
+  prefs.putBool ("relayOn",  relayOn);
+  prefs.putBool ("active",   sessionActive);
+  prefs.end();
+}
+void loadSessionFromPrefs() {
+  prefs.begin("session", true);
+  if (prefs.getBool("active", false) && prefs.getBool("relayOn", false)) {
+    sessionEnergyWh = prefs.getFloat("energyWh", 0);
+    sessionKwh      = prefs.getFloat("kwh",      0);
+    sessionCost     = prefs.getFloat("cost",     0);
+    lastV           = prefs.getFloat("lastV",    0);
+    lastI           = prefs.getFloat("lastI",    0);
+    lastP           = prefs.getFloat("lastP",    0);
+    hadDataOnce     = prefs.getBool ("hadData",  false);
+    sessionActive   = true;
+    Serial.printf("[Session] Restored: %.4f kWh Rp%.0f\n", sessionKwh, sessionCost);
+  }
+  prefs.end();
+}
+void clearSessionPrefs() {
+  prefs.begin("session", false);
+  prefs.putFloat("energyWh", 0); prefs.putFloat("kwh", 0); prefs.putFloat("cost", 0);
+  prefs.putBool("hadData", false); prefs.putBool("relayOn", false); prefs.putBool("active", false);
+  prefs.end();
+}
 
 // ================================================================
 // RELAY
 // ================================================================
-void setRelay(bool on) {
+void setRelay(bool on, const char* reason) {
   relayOn = on;
   digitalWrite(PIN_RELAY, on ? RELAY_ON : RELAY_OFF);
-  Serial.printf("[Relay] %s\n", on ? "ON - listrik mengalir" : "OFF - listrik terputus");
+  if (!on) { sessionActive = false; disconnectCount = 0; clearSessionPrefs(); }
+  else      { sessionActive = true; }
+  Serial.printf("[Relay] %s — %s\n", on ? "ON" : "OFF", reason);
 }
 
 // ================================================================
-// CLEAR FIREBASE COMMAND
+// DEVICE DISCONNECT — 2 pembacaan berturutan → relay OFF
+// ================================================================
+void handleDeviceDisconnect() {
+  if (!relayOn || !sessionActive) return;
+  if (!deviceConnected && prevDevConn) {
+    disconnectCount++;
+    Serial.printf("[Disconnect] %d/%d\n", disconnectCount, DISCONNECT_THRESHOLD);
+    if (disconnectCount >= DISCONNECT_THRESHOLD) {
+      Serial.println("[Disconnect] Device dicabut — relay OFF");
+      if (wifiConnected) {
+        unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
+        sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, true, ts);
+      }
+      setRelay(false, "device dicabut");
+      sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0; hadDataOnce = false;
+    }
+  } else if (deviceConnected) {
+    disconnectCount = 0;
+  }
+}
+
+// ================================================================
+// OVERLOAD — relay OFF + alert linger
+// ================================================================
+void handleOverload(float power) {
+  bool newOvl = deviceConnected && (power >= overloadThreshold);
+  if (newOvl && !isOverload) {
+    isOverload = true;
+    Serial.printf("[Overload] %.1fW >= %.0fW — relay OFF\n", power, overloadThreshold);
+    setRelay(false, "overload");
+    overloadAlertLinger = true;
+    overloadLingerStart = millis();
+    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
+  } else if (!newOvl && isOverload) {
+    isOverload = false;
+    Serial.println("[Overload] Teratasi");
+  }
+}
+
+// ================================================================
+// FIREBASE
 // ================================================================
 void clearFirebaseCommand() {
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(5000);
-  HTTPClient http;
-  if (http.begin(client, String(FIREBASE_HOST) + "/command/relay.json")) {
-    http.addHeader("Content-Type", "application/json");
-    http.PUT("null");
-    http.end();
+  WiFiClientSecure c; c.setInsecure(); c.setTimeout(5000);
+  HTTPClient h;
+  if (h.begin(c, String(FIREBASE_HOST) + "/command/relay.json")) {
+    h.addHeader("Content-Type","application/json"); h.PUT("null"); h.end();
   }
 }
 
-// ================================================================
-// POLL COMMAND DARI FIREBASE
-// Web tulis /command/relay: true atau false
-// ESP32 polling tiap 2 detik, eksekusi lalu clear
-// ================================================================
 void pollCommandFromFirebase() {
   if (!wifiConnected || WiFi.status() != WL_CONNECTED) return;
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(5000);
-  HTTPClient http;
-  if (!http.begin(client, String(FIREBASE_HOST) + "/command/relay.json")) return;
-  int code = http.GET();
+  WiFiClientSecure c; c.setInsecure(); c.setTimeout(5000);
+  HTTPClient h;
+  if (!h.begin(c, String(FIREBASE_HOST) + "/command/relay.json")) return;
+  int code = h.GET();
   if (code == 200) {
-    String payload = http.getString();
-    payload.trim();
-    http.end();
-    if (payload == "true") {
-      Serial.println("[Command] Relay ON dari web");
-      setRelay(true);
+    String pl = h.getString(); pl.trim(); h.end();
+    if (pl == "true" && !relayOn) {
+      sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
+      hadDataOnce=false; disconnectCount=0; isOverload=false;
+      overloadAlertLinger=false;
+      setRelay(true, "perintah web");
       clearFirebaseCommand();
-    } else if (payload == "false") {
-      Serial.println("[Command] Relay OFF dari web");
-      setRelay(false);
-      // Reset akumulasi sesi lokal saat relay dimatikan
-      sessionEnergyWh = 0.0f;
-      sessionKwh      = 0.0f;
-      sessionCost     = 0.0f;
-      prevDevConn     = false;
+    } else if (pl == "false" && relayOn) {
+      setRelay(false, "stop session web");
+      sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
+      hadDataOnce=false; prevDevConn=false; disconnectCount=0;
       clearFirebaseCommand();
     }
-    // "null" = tidak ada command baru
-  } else {
-    http.end();
-  }
+  } else h.end();
 }
 
-// ================================================================
-// SYNC THRESHOLD
-// ================================================================
 void syncThresholdFromFirebase() {
   if (!wifiConnected || WiFi.status() != WL_CONNECTED) return;
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(8000);
-  HTTPClient http;
-  if (!http.begin(client, String(FIREBASE_HOST) + "/config/threshold.json")) return;
-  http.addHeader("Content-Type", "application/json");
-  int code = http.GET();
-  if (code == 200) {
-    String payload = http.getString();
-    payload.trim();
-    if (payload != "null" && payload.length() > 0) {
-      float newThr = payload.toFloat();
-      if (newThr > 0 && newThr != overloadThreshold) {
-        overloadThreshold = newThr;
-        savePrefs();
-        Serial.printf("[Threshold] Updated: %.0f W\n", newThr);
+  WiFiClientSecure c; c.setInsecure(); c.setTimeout(8000);
+  HTTPClient h;
+  if (!h.begin(c, String(FIREBASE_HOST) + "/config/threshold.json")) return;
+  if (h.GET() == 200) {
+    String pl = h.getString(); pl.trim();
+    if (pl != "null" && pl.length() > 0) {
+      float v = pl.toFloat();
+      if (v > 0 && v != overloadThreshold) {
+        overloadThreshold = v; savePrefs();
+        Serial.printf("[Threshold] %.0f W\n", v);
       }
     }
   }
-  http.end();
+  h.end();
+}
+
+bool sendToFirebase(float v, float i, float p, float pf, float hz,
+                    float kwh, float cost, bool dev, bool ovl,
+                    bool relay, unsigned long ts) {
+  if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
+  WiFiClientSecure c; c.setInsecure(); c.setTimeout(10000);
+  HTTPClient h;
+  h.begin(c, String(FIREBASE_HOST) + FIREBASE_PATH);
+  h.addHeader("Content-Type","application/json");
+  String j = "{";
+  j += "\"system\":{\"timestamp\":" + String(ts) + ",\"internet\":true";
+  j += ",\"threshold\":" + String(overloadThreshold,0);
+  j += ",\"tarif\":"     + String(tarif,2);
+  j += ",\"relay\":"     + String(relay ? "true":"false");
+  j += ",\"offline\":"   + String(modeOffline ? "true":"false") + "},";
+  j += "\"connected\":"  + String(dev  ? "true":"false") + ",";
+  j += "\"overload\":"   + String(ovl  ? "true":"false") + ",";
+  j += "\"device\":{";
+  j += "\"voltage\":"    + String(v,1)   + ",";
+  j += "\"current\":"    + String(i,2)   + ",";
+  j += "\"power\":"      + String(p,1)   + ",";
+  j += "\"apparent\":"   + String(v*i,1) + ",";
+  j += "\"pf\":"         + String(pf,2)  + ",";
+  j += "\"frequency\":"  + String(hz,1)  + ",";
+  j += "\"energy\":"     + String(kwh,4) + ",";
+  j += "\"cost\":"       + String(cost,0)+ ",";
+  j += "\"overload\":"   + String(ovl ? "true":"false") + "}}";
+  int code = h.PUT(j); h.end();
+  Serial.printf("[FB] %d P=%.1fW E=%.4fkWh\n", code, p, kwh);
+  return (code == 200 || code == 204);
 }
 
 // ================================================================
-// WIFI MANAGER
+// LOCAL AP
 // ================================================================
-const char CUSTOM_HTML_HEAD[] PROGMEM = R"rawliteral(
-<style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{background:#0a0a0a;color:#f0f0f0;font-family:sans-serif;
-       min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-  .card{background:#111;border:1px solid rgba(255,255,255,0.07);
-        border-radius:18px;padding:32px;width:100%;max-width:380px}
-  h1{font-size:16px;font-weight:700;color:#f0f0f0;margin-bottom:6px}
-  p{font-size:13px;color:#666;margin-bottom:24px}
-  label{display:block;font-size:11px;font-weight:600;color:#888;
-        letter-spacing:0.05em;text-transform:uppercase;margin-bottom:6px}
-  input[type=text],input[type=password]{
-    width:100%;padding:10px 14px;background:#1a1a1a;
-    border:1px solid rgba(255,255,255,0.07);border-radius:6px;
-    color:#f0f0f0;font-size:14px;outline:none;margin-bottom:16px}
-  input[type=submit]{width:100%;padding:11px;background:#00e5ff;color:#000;
-    font-weight:700;font-size:14px;border:none;border-radius:6px;cursor:pointer}
-</style>
-)rawliteral";
+void startLocalAP() {
+  IPAddress ip(192,168,4,1), sub(255,255,255,0);
+  WiFi.softAPConfig(ip, ip, sub);
+  WiFi.softAP(AP_SSID, AP_PASS);
+  Serial.printf("[AP] '%s' aktif — 192.168.4.1\n", AP_SSID);
+}
 
-const char CUSTOM_HTML_BODY[] PROGMEM = R"rawliteral(
+// ================================================================
+// LOCAL WEBSERVER — HTML
+// Hanya form konfigurasi: WiFi, threshold, tarif + reset
+// Tidak ada status sensor, tidak ada autentikasi
+// ================================================================
+void handleRoot() {
+  String html =
+    F("<!DOCTYPE html><html lang='id'><head>"
+      "<meta charset='UTF-8'/>"
+      "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'/>"
+      "<title>SEM Config</title><style>"
+      // Reset & base
+      "*{margin:0;padding:0;box-sizing:border-box}"
+      "body{background:#0a0a0a;color:#f0f0f0;"
+        "font-family:-apple-system,BlinkMacSystemFont,sans-serif;"
+        "padding:20px;max-width:440px;margin:0 auto;min-height:100vh}"
+      // Header
+      ".hdr{display:flex;align-items:center;gap:12px;"
+        "margin-bottom:24px;padding-bottom:16px;"
+        "border-bottom:1px solid rgba(255,255,255,0.06)}"
+      ".hdr-icon{width:38px;height:38px;background:rgba(0,229,255,0.1);"
+        "border:1px solid #00e5ff;border-radius:9px;"
+        "display:flex;align-items:center;justify-content:center;"
+        "font-size:20px;flex-shrink:0}"
+      ".hdr-t{font-size:15px;font-weight:700;color:#00e5ff;letter-spacing:.05em}"
+      ".hdr-s{font-size:11px;color:#444;margin-top:2px}"
+      // Card section
+      ".card{background:#111;border:1px solid rgba(255,255,255,0.06);"
+        "border-radius:14px;padding:18px;margin-bottom:14px}"
+      ".card-title{font-size:10px;font-weight:700;color:#444;"
+        "letter-spacing:.1em;text-transform:uppercase;"
+        "margin-bottom:16px;padding-bottom:10px;"
+        "border-bottom:1px solid rgba(255,255,255,0.04)}"
+      // Form elements
+      "label{display:block;font-size:11px;font-weight:600;color:#666;"
+        "text-transform:uppercase;letter-spacing:.05em;margin-bottom:7px}"
+      ".fg{margin-bottom:14px}"
+      ".fg:last-of-type{margin-bottom:0}"
+      "input{width:100%;padding:11px 14px;background:#1a1a1a;"
+        "border:1px solid rgba(255,255,255,0.08);border-radius:8px;"
+        "color:#f0f0f0;font-size:15px;outline:none;"
+        "-webkit-appearance:none;appearance:none}"
+      "input:focus{border-color:#00e5ff;"
+        "box-shadow:0 0 0 3px rgba(0,229,255,0.08)}"
+      "input::placeholder{color:#333}"
+      ".hint{font-size:11px;color:#3a3a3a;margin-top:6px;line-height:1.5}"
+      // Buttons
+      ".btn{display:block;width:100%;padding:12px;border:none;"
+        "border-radius:8px;font-size:14px;font-weight:700;"
+        "cursor:pointer;margin-top:16px;transition:opacity .15s}"
+      ".btn:active{opacity:.75}"
+      ".btn-primary{background:#00e5ff;color:#000}"
+      ".btn-ghost{background:transparent;color:#555;"
+        "border:1px solid rgba(255,255,255,0.09);margin-top:10px}"
+      // Toast notification
+      "#toast{position:fixed;bottom:20px;left:50%;"
+        "transform:translateX(-50%) translateY(60px);"
+        "background:#1a1a1a;border:1px solid rgba(255,255,255,0.12);"
+        "color:#f0f0f0;padding:11px 20px;border-radius:10px;"
+        "font-size:13px;font-weight:500;white-space:nowrap;"
+        "transition:transform .25s ease;pointer-events:none;z-index:99}"
+      "#toast.show{transform:translateX(-50%) translateY(0)}"
+      "#toast.ok{border-color:rgba(0,230,118,.35);color:#00e676}"
+      "#toast.err{border-color:rgba(255,23,68,.35);color:#ff1744}"
+      // Footer
+      ".footer{text-align:center;font-size:11px;color:#2a2a2a;"
+        "margin-top:20px;line-height:1.8}"
+      "</style></head><body>");
+
+  // ── Header ─────────────────────────────────────────────────
+  html += F("<div class='hdr'>"
+    "<div class='hdr-icon'>⚡</div>"
+    "<div>"
+      "<div class='hdr-t'>SEM · Config</div>"
+      "<div class='hdr-s'>Smart Energy Monitor</div>"
+    "</div>"
+    "</div>");
+
+  // ── Card 1: WiFi ───────────────────────────────────────────
+  html += F("<div class='card'>"
+    "<div class='card-title'>Konfigurasi WiFi</div>"
+    "<div class='fg'>"
+      "<label>Nama WiFi (SSID)</label>"
+      "<input type='text' id='ssid' placeholder='Nama jaringan WiFi' autocomplete='off' spellcheck='false'/>"
+    "</div>"
+    "<div class='fg'>"
+      "<label>Password</label>"
+      "<input type='password' id='wpass' placeholder='Password WiFi' autocomplete='new-password'/>"
+    "</div>"
+    "<div class='hint'>ESP32 akan mencoba terhubung. Halaman ini tetap bisa diakses setelah berhasil.</div>"
+    "<button class='btn btn-primary' onclick='connectWifi()'>Hubungkan WiFi</button>"
+    "</div>");
+
+  // ── Card 2: Threshold & Tarif ──────────────────────────────
+  html += F("<div class='card'>"
+    "<div class='card-title'>Pengaturan</div>"
+    "<div class='fg'>"
+      "<label>Batas Overload (Watt)</label>"
+      "<input type='number' id='thr' min='100' max='10000' step='100' placeholder='2000'/>"
+      "<div class='hint'>Relay mati otomatis jika daya melebihi nilai ini.</div>"
+    "</div>"
+    "<div class='fg'>"
+      "<label>Tarif per kWh (Rp)</label>"
+      "<input type='number' id='trf' min='0' step='0.01' placeholder='1444.70'/>"
+      "<div class='hint'>Untuk kalkulasi estimasi biaya sesi.</div>"
+    "</div>"
+    "<button class='btn btn-primary' onclick='saveSettings()'>Simpan Pengaturan</button>"
+    "</div>");
+
+  // ── Card 3: Reset WiFi ─────────────────────────────────────
+  html += F("<div class='card'>"
+    "<div class='card-title'>Reset</div>"
+    "<div class='hint' style='margin-bottom:4px'>"
+      "Hapus semua konfigurasi WiFi tersimpan dan restart ESP32."
+    "</div>"
+    "<button class='btn btn-ghost' "
+      "onclick=\"if(confirm('Yakin? Semua konfigurasi WiFi akan dihapus.'))resetWifi()\">"
+      "Reset WiFi &amp; Restart"
+    "</button>"
+    "</div>");
+
+  // ── Footer ─────────────────────────────────────────────────
+  html += F("<div class='footer'>"
+    "SEM-Config &nbsp;·&nbsp; 192.168.4.1<br>"
+    "pw: 12345678"
+    "</div>");
+
+  // ── Toast element ──────────────────────────────────────────
+  html += F("<div id='toast'></div>");
+
+  // ── JavaScript ─────────────────────────────────────────────
+  html += F("<script>");
+
+  // Isi input dengan nilai saat ini dari flash
+  html += "document.getElementById('thr').value=" + String(overloadThreshold, 0) + ";";
+  html += "document.getElementById('trf').value=" + String(tarif, 2) + ";";
+
+  // Fungsi toast
+  html += F(
+    "var _tt;"
+    "function toast(msg,type){"
+      "var el=document.getElementById('toast');"
+      "el.textContent=msg;"
+      "el.className=type||'';"
+      "el.classList.add('show');"
+      "clearTimeout(_tt);"
+      "_tt=setTimeout(function(){el.classList.remove('show');},3500);"
+    "}"
+
+    // Simpan threshold + tarif → /save
+    "function saveSettings(){"
+      "var thr=parseFloat(document.getElementById('thr').value);"
+      "var trf=parseFloat(document.getElementById('trf').value);"
+      "if(isNaN(thr)||thr<100||thr>10000){toast('Threshold harus 100–10000 W','err');return;}"
+      "if(isNaN(trf)||trf<=0){toast('Tarif harus lebih dari 0','err');return;}"
+      "fetch('/save?thr='+thr+'&trf='+trf)"
+        ".then(function(r){return r.text();})"
+        ".then(function(t){toast(t,'ok');})"
+        ".catch(function(){toast('Gagal menyimpan — coba lagi','err');});"
+    "}"
+
+    // Connect WiFi → /connectwifi
+    "function connectWifi(){"
+      "var ssid=document.getElementById('ssid').value.trim();"
+      "var pass=document.getElementById('wpass').value;"
+      "if(!ssid){toast('SSID tidak boleh kosong','err');return;}"
+      "toast('Menghubungkan ke \"'+ssid+'\"...','');"
+      "fetch('/connectwifi?ssid='+encodeURIComponent(ssid)+'&pass='+encodeURIComponent(pass))"
+        ".then(function(r){return r.text();})"
+        ".then(function(t){"
+          "toast(t, t.indexOf('Berhasil')>=0?'ok':'err');"
+        "})"
+        ".catch(function(){toast('Tidak ada respons — ESP32 sedang mencoba connect','err');});"
+    "}"
+
+    // Reset WiFi → /resetwifi
+    "function resetWifi(){"
+      "fetch('/resetwifi')"
+        ".then(function(){toast('WiFi direset — ESP32 akan restart...','ok');});"
+    "}"
+  );
+
+  html += F("</script></body></html>");
+
+  localServer.send(200, "text/html; charset=utf-8", html);
+}
+
+// Handler: simpan threshold & tarif
+void handleSave() {
+  bool ok = false;
+  if (localServer.hasArg("thr")) {
+    float v = localServer.arg("thr").toFloat();
+    if (v >= 100 && v <= 10000) { overloadThreshold = v; ok = true; }
+  }
+  if (localServer.hasArg("trf")) {
+    float v = localServer.arg("trf").toFloat();
+    if (v > 0) { tarif = v; ok = true; }
+  }
+  if (ok) {
+    savePrefs();
+    // Jika online, push threshold ke Firebase supaya web sync
+    if (wifiConnected) {
+      WiFiClientSecure c; c.setInsecure(); c.setTimeout(5000);
+      HTTPClient h;
+      if (h.begin(c, String(FIREBASE_HOST) + "/config/threshold.json")) {
+        h.addHeader("Content-Type","application/json");
+        h.PUT(String(overloadThreshold,0));
+        h.end();
+      }
+    }
+    Serial.printf("[LocalWeb] Saved: thr=%.0fW trf=%.2f\n", overloadThreshold, tarif);
+    localServer.send(200, "text/plain",
+      "✓ Tersimpan! Threshold=" + String(overloadThreshold,0) +
+      "W | Tarif=Rp" + String(tarif,2));
+  } else {
+    localServer.send(400, "text/plain", "Nilai tidak valid");
+  }
+}
+
+// Handler: connect ke WiFi baru
+// ESP32 coba connect ke SSID yang diberikan selama 10 detik
+void handleConnectWifi() {
+  if (!localServer.hasArg("ssid")) {
+    localServer.send(400, "text/plain", "SSID diperlukan");
+    return;
+  }
+  String ssid = localServer.arg("ssid");
+  String pass = localServer.hasArg("pass") ? localServer.arg("pass") : "";
+
+  Serial.printf("[LocalWeb] Coba connect WiFi: %s\n", ssid.c_str());
+
+  // Simpan kredensial ke flash WiFi
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  // Tunggu 10 detik
+  int waited = 0;
+  while (WiFi.status() != WL_CONNECTED && waited < 20) {
+    delay(500); waited++;
+    localServer.handleClient(); // agar webserver tidak timeout
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    modeOffline   = false;
+    digitalWrite(PIN_LED_BLUE, HIGH);
+    String ip = WiFi.localIP().toString();
+    Serial.println("[LocalWeb] WiFi OK: " + ip);
+    // Kirim status awal ke Firebase
+    if (!ntpSynced) ntpSynced = tryNTPSync();
+    syncThresholdFromFirebase();
+    clearFirebaseCommand();
+    localServer.send(200, "text/plain",
+      "✓ Berhasil! IP: " + ip + " — Dashboard web aktif kembali.");
+  } else {
+    Serial.println("[LocalWeb] Gagal connect WiFi");
+    localServer.send(200, "text/plain",
+      "✗ Gagal terhubung ke \"" + ssid + "\". Cek SSID & password, lalu coba lagi.");
+  }
+}
+
+// Handler: reset WiFi & restart
+void handleResetWifi() {
+  localServer.send(200, "text/plain", "Mereset konfigurasi WiFi — ESP32 restart...");
+  delay(500);
+  WiFiManager wm; wm.resetSettings();
+  ESP.restart();
+}
+
+void handleNotFound() {
+  localServer.send(404, "text/plain", "404 Not Found");
+}
+
+void setupWebServer() {
+  localServer.on("/",            HTTP_GET, handleRoot);
+  localServer.on("/save",        HTTP_GET, handleSave);
+  localServer.on("/connectwifi", HTTP_GET, handleConnectWifi);
+  localServer.on("/resetwifi",   HTTP_GET, handleResetWifi);
+  localServer.onNotFound(handleNotFound);
+  localServer.begin();
+  Serial.println("[LocalWeb] Server aktif di http://192.168.4.1");
+}
+
+// ================================================================
+// WIFI MANAGER (portal setup awal)
+// ================================================================
+const char WIFI_MGR_HEAD[] PROGMEM = R"html(
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;color:#f0f0f0;font-family:sans-serif;
+     min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#111;border:1px solid rgba(255,255,255,0.07);
+      border-radius:18px;padding:32px;width:100%;max-width:380px}
+h1{font-size:16px;font-weight:700;margin-bottom:6px}
+p{font-size:13px;color:#666;margin-bottom:24px}
+label{display:block;font-size:11px;font-weight:600;color:#888;
+      letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px}
+input[type=text],input[type=password]{width:100%;padding:10px 14px;background:#1a1a1a;
+  border:1px solid rgba(255,255,255,0.07);border-radius:6px;
+  color:#f0f0f0;font-size:14px;outline:none;margin-bottom:16px}
+input[type=submit]{width:100%;padding:11px;background:#00e5ff;color:#000;
+  font-weight:700;font-size:14px;border:none;border-radius:6px;cursor:pointer}
+</style>
+)html";
+
+const char WIFI_MGR_BODY[] PROGMEM = R"html(
 <div class="card">
-  <h1>Smart Energy Monitor</h1>
-  <p>Pilih WiFi dan masukkan password untuk menghubungkan perangkat.</p>
-)rawliteral";
+<h1>Smart Energy Monitor</h1>
+<p>Pilih WiFi dan masukkan password untuk menghubungkan perangkat.</p>
+)html";
 
 void startWiFiManager() {
   oledStatus("WiFi Setup", "AP: SEM-Setup");
-  digitalWrite(PIN_LED_WIFI, HIGH);
   WiFiManager wm;
-  wm.setCustomHeadElement(CUSTOM_HTML_HEAD);
-  wm.setCustomMenuHTML(CUSTOM_HTML_BODY);
-  WiFiManagerParameter param_threshold("threshold", "Overload Threshold (Watt)",
-    String(overloadThreshold, 0).c_str(), 8);
-  WiFiManagerParameter param_tarif("tarif", "Tariff per kWh (IDR)",
-    String(tarif, 2).c_str(), 10);
-  wm.addParameter(&param_threshold);
-  wm.addParameter(&param_tarif);
+  wm.setCustomHeadElement(WIFI_MGR_HEAD);
+  wm.setCustomMenuHTML(WIFI_MGR_BODY);
+  WiFiManagerParameter p_thr("thr", "Overload Threshold (Watt)",
+    String(overloadThreshold,0).c_str(), 8);
+  WiFiManagerParameter p_trf("trf", "Tariff per kWh (IDR)",
+    String(tarif,2).c_str(), 10);
+  wm.addParameter(&p_thr);
+  wm.addParameter(&p_trf);
   wm.setConfigPortalTimeout(180);
   wm.setTitle("Smart Energy Monitor");
   wm.setDarkMode(true);
-  bool connected = wm.startConfigPortal("SEM-Setup");
-  if (connected) {
-    float thr = String(param_threshold.getValue()).toFloat();
-    float trf  = String(param_tarif.getValue()).toFloat();
-    if (thr > 0) overloadThreshold = thr;
-    if (trf > 0) tarif = trf;
+  bool ok = wm.startConfigPortal("SEM-Setup");
+  if (ok) {
+    float t1 = String(p_thr.getValue()).toFloat();
+    float t2 = String(p_trf.getValue()).toFloat();
+    if (t1 > 0) overloadThreshold = t1;
+    if (t2 > 0) tarif = t2;
     savePrefs();
-    wifiConnected = true;
+    wifiConnected = true; modeOffline = false;
   } else {
-    wifiConnected = false;
+    wifiConnected = false; modeOffline = true;
   }
 }
 
 // ================================================================
 // WIFI CONNECT
 // ================================================================
-bool tryConnectWiFi(int timeoutSeconds) {
-  WiFi.mode(WIFI_STA);
+bool tryConnectWiFi(int sec) {
   WiFi.begin();
-  Serial.print("Connecting WiFi");
-  int elapsed = 0;
-  while (WiFi.status() != WL_CONNECTED && elapsed < timeoutSeconds * 2) {
+  Serial.print("[WiFi] Connecting");
+  for (int i = 0; i < sec*2 && WiFi.status() != WL_CONNECTED; i++) {
     delay(500); Serial.print(".");
     blinkState = !blinkState;
-    digitalWrite(PIN_LED_WIFI, blinkState);
-    elapsed++;
+    digitalWrite(PIN_LED_BLUE, blinkState);
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi OK: " + WiFi.localIP().toString());
-    digitalWrite(PIN_LED_WIFI, HIGH);
-    return true;
+    Serial.println("\n[WiFi] OK: " + WiFi.localIP().toString());
+    digitalWrite(PIN_LED_BLUE, HIGH);
+    modeOffline = false; return true;
   }
-  Serial.println("\nWiFi gagal");
-  digitalWrite(PIN_LED_WIFI, LOW);
+  Serial.println("\n[WiFi] Gagal");
   return false;
 }
 
@@ -299,99 +696,62 @@ bool tryConnectWiFi(int timeoutSeconds) {
 // NTP
 // ================================================================
 bool tryNTPSync() {
-  configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-  struct tm ti;
-  int retry = 0;
-  while (!getLocalTime(&ti) && retry < 20) { delay(500); retry++; }
-  return retry < 20;
+  configTime(7*3600, 0, "pool.ntp.org", "time.nist.gov");
+  struct tm ti; int r = 0;
+  while (!getLocalTime(&ti) && r < 20) { delay(500); r++; }
+  return r < 20;
 }
 
 // ================================================================
-// FIREBASE SEND
+// LED HANDLERS
 // ================================================================
-bool sendToFirebase(float v, float i, float p, float pf, float freq,
-                    float kwh, float cost, bool devConn, bool overload,
-                    bool relay, unsigned long ts) {
-  if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(10000);
-  HTTPClient http;
-  http.begin(client, String(FIREBASE_HOST) + FIREBASE_PATH);
-  http.addHeader("Content-Type", "application/json");
-  String json = "{";
-  json += "\"system\":{";
-  json += "\"timestamp\":"  + String(ts)                   + ",";
-  json += "\"internet\":true,";
-  json += "\"threshold\":"  + String(overloadThreshold, 0) + ",";
-  json += "\"tarif\":"      + String(tarif, 2)             + ",";
-  
-  // SESUDAH (fix)
-json += "\"relay\":"     + String(relay    ? "true" : "false") + "},";
-json += "\"connected\":" + String(devConn  ? "true" : "false") + ",";
-json += "\"overload\":"  + String(overload ? "true" : "false") + "}}";
-  json += "\"voltage\":"    + String(v,    1)               + ",";
-  json += "\"current\":"    + String(i,    2)               + ",";
-  json += "\"power\":"      + String(p,    1)               + ",";
-  json += "\"apparent\":"   + String(v * i, 1)              + ",";
-  json += "\"pf\":"         + String(pf,   2)               + ",";
-  json += "\"frequency\":"  + String(freq, 1)               + ",";
-  json += "\"energy\":"     + String(kwh,  4)               + ",";
-  json += "\"cost\":"       + String(cost, 0)               + ",";
-  json += "\"overload\":"  + String(overload ? "true" : "false") + "}}";
-  int code = http.PUT(json);
-  Serial.printf("Firebase: %d\n", code);
-  http.end();
-  return (code == 200 || code == 204);
+void handleBlueLed() {
+  if (wifiConnected && WiFi.status() == WL_CONNECTED) {
+    digitalWrite(PIN_LED_BLUE, HIGH); return;
+  }
+  if (millis() - lastBlinkMs >= 500) {
+    blinkState = !blinkState;
+    digitalWrite(PIN_LED_BLUE, blinkState);
+    lastBlinkMs = millis();
+  }
 }
 
-// ================================================================
-// BUZZER
-// ================================================================
-void handleBuzzer() {
-  if (!isOverload) {
-    digitalWrite(PIN_BUZZER, LOW);
-    buzzerActive = false; buzzerBeepCount = 0; buzzerState = false;
+void handleGreenLed() {
+  // Nyala saat V>0 dan I>0 (device terhubung), mati jika tidak ada
+  digitalWrite(PIN_LED_GREEN, deviceConnected ? HIGH : LOW);
+}
+
+// LED Merah + Buzzer sinkron:
+// - Aktif saat isOverload = true
+// - Tetap aktif OVERLOAD_ALERT_LINGER ms setelah overload selesai (linger)
+void handleOverloadAlert() {
+  // Cek apakah linger sudah habis
+  if (overloadAlertLinger && !isOverload) {
+    if (millis() - overloadLingerStart >= OVERLOAD_ALERT_LINGER) {
+      overloadAlertLinger = false;
+      overloadBlinkState  = false;
+      digitalWrite(PIN_LED_RED, LOW);
+      digitalWrite(PIN_BUZZER,  LOW);
+      Serial.println("[Alert] Linger selesai");
+      return;
+    }
+  }
+
+  bool active = isOverload || overloadAlertLinger;
+  if (!active) {
+    digitalWrite(PIN_LED_RED, LOW);
+    digitalWrite(PIN_BUZZER,  LOW);
+    overloadBlinkState = false;
     return;
   }
-  unsigned long now = millis();
-  if (!buzzerActive) {
-    buzzerActive = true; buzzerBeepCount = 0; buzzerState = false; lastBuzzerMs = now;
-  }
-  if (buzzerBeepCount < BUZZER_BEEPS) {
-    unsigned long interval = buzzerState ? BUZZER_ON_MS : BUZZER_OFF_MS;
-    if (now - lastBuzzerMs >= interval) {
-      buzzerState = !buzzerState;
-      digitalWrite(PIN_BUZZER, buzzerState ? HIGH : LOW);
-      if (!buzzerState) buzzerBeepCount++;
-      lastBuzzerMs = now;
-    }
-  } else {
-    if (now - lastBuzzerMs >= 2000) { buzzerBeepCount = 0; lastBuzzerMs = now; }
-  }
-}
 
-// ================================================================
-// LED WiFi — blink saat connecting, solid saat online
-// ================================================================
-void handleWifiLed() {
-  if (wifiConnected && WiFi.status() == WL_CONNECTED) {
-    digitalWrite(PIN_LED_WIFI, HIGH); return;
+  // Blink sinkron 200ms
+  if (millis() - lastOverloadBlinkMs >= OVERLOAD_BLINK_MS) {
+    overloadBlinkState = !overloadBlinkState;
+    digitalWrite(PIN_LED_RED, overloadBlinkState ? HIGH : LOW);
+    digitalWrite(PIN_BUZZER,  overloadBlinkState ? HIGH : LOW);
+    lastOverloadBlinkMs = millis();
   }
-  unsigned long now = millis();
-  if (now - lastBlinkMs >= 500) {
-    blinkState = !blinkState;
-    digitalWrite(PIN_LED_WIFI, blinkState);
-    lastBlinkMs = now;
-  }
-}
-
-// ================================================================
-// RGB LED
-// ================================================================
-void handleRgbLed() {
-  digitalWrite(PIN_LED_GREEN, (wifiConnected && WiFi.status() == WL_CONNECTED) ? HIGH : LOW);
-  digitalWrite(PIN_LED_RED,   isOverload ? HIGH : LOW);
 }
 
 // ================================================================
@@ -399,14 +759,14 @@ void handleRgbLed() {
 // ================================================================
 void checkResetButton() {
   if (digitalRead(PIN_RESET_WIFI) != LOW) return;
-  unsigned long pressStart = millis();
+  unsigned long t = millis();
   oledStatus("Hold to reset", "WiFi credentials");
   while (digitalRead(PIN_RESET_WIFI) == LOW) {
     delay(100);
-    if (millis() - pressStart >= 3000) {
-      oledStatus("Resetting...", "");
+    if (millis() - t >= 3000) {
+      oledStatus("Resetting WiFi...", "");
       WiFiManager wm; wm.resetSettings();
-      delay(1000); ESP.restart();
+      delay(500); ESP.restart();
     }
   }
 }
@@ -415,49 +775,74 @@ void checkResetButton() {
 // OLED
 // ================================================================
 void oledSplash() {
-  display.clearDisplay();
-  display.setTextColor(WHITE); display.setTextSize(1);
-  display.setCursor(0, 0);  display.println("SMART ENERGY");
-  display.setCursor(0, 10); display.println("MONITOR v3.0");
-  display.drawLine(0, 20, 127, 20, WHITE);
-  display.setCursor(0, 26); display.println("Initializing...");
+  display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
+  display.setCursor(0,0);  display.println("SMART ENERGY");
+  display.setCursor(0,10); display.println("MONITOR v3.0");
+  display.drawLine(0,20,127,20,WHITE);
+  display.setCursor(0,26); display.println("Initializing...");
   display.display();
 }
 
 void oledStatus(const char* l1, const char* l2) {
-  display.clearDisplay();
-  display.setTextColor(WHITE); display.setTextSize(1);
-  display.setCursor(0, 20); display.println(l1);
-  if (strlen(l2) > 0) { display.setCursor(0, 36); display.println(l2); }
+  display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
+  display.setCursor(0,20); display.println(l1);
+  if (l2 && strlen(l2)) { display.setCursor(0,36); display.println(l2); }
   display.display();
 }
 
-void oledData(float v, float i, float p, float pf, float freq,
-              float kwh, float cost, bool devConn, bool online, bool ovld, bool relay) {
-  display.clearDisplay();
-  display.setTextColor(WHITE); display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.print(online ? "[WiFi]" : "[OFFLINE]");
-  display.setCursor(72, 0);
+void oledData(float v, float i, float p, float pf, float hz, float kwh,
+              float cost, bool dev, bool online, bool ovl, bool relay,
+              bool offline, unsigned long offMs) {
+  display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
+
+  // Baris 0: status
+  display.setCursor(0,0);
+  if (offline) {
+    unsigned long s = offMs/1000;
+    if (s < 60) display.printf("[OFF %lus]", s);
+    else        display.printf("[OFF %lum%lus]", s/60, s%60);
+  } else {
+    display.print(online ? "[WiFi]" : "[NoWiFi]");
+  }
+  display.setCursor(72,0);
   display.print(relay ? "[RLY:ON]" : "[RLY:OFF]");
-  display.drawLine(0, 9, 127, 9, WHITE);
-  if (ovld) { display.setCursor(0, 0); display.print("!! OVERLOAD !!"); }
+  display.drawLine(0,9,127,9,WHITE);
+
+  // Overload/linger
+  if (ovl || overloadAlertLinger) {
+    display.setCursor(0,13); display.println("!! OVERLOAD !!");
+    display.setCursor(0,23); display.printf("%.1fW >= %.0fW", lastP, overloadThreshold);
+    display.setCursor(0,33); display.println("Relay OFF-Proteksi");
+    display.setCursor(0,43); display.println("192.168.4.1");
+    display.display(); return;
+  }
+
+  // Relay OFF
   if (!relay) {
-    display.setCursor(15, 26); display.println("Relay OFF");
-    display.setCursor(0, 42);  display.println("Klik web utk mulai");
+    display.setCursor(10,20); display.println("Relay OFF");
+    if (offline) {
+      display.setCursor(0,32); display.println("SEM-Config:12345678");
+      display.setCursor(0,44); display.println("-> 192.168.4.1");
+    } else {
+      display.setCursor(0,32); display.println("Web: klik + utk mulai");
+    }
     display.display(); return;
   }
-  if (!devConn) {
-    display.setCursor(15, 26); display.println("No Device");
-    display.setCursor(5, 42);  display.println("Colokkan beban...");
+
+  // No device
+  if (!dev) {
+    display.setCursor(15,20); display.println("No Device");
+    display.setCursor(5,32);  display.println("Colokkan beban...");
     display.display(); return;
   }
-  display.setCursor(0, 13); display.printf("V:%.1fV  I:%.2fA", v, i);
-  display.setCursor(0, 23); display.printf("P:%.1fW  PF:%.2f", p, pf);
-  display.setCursor(0, 33); display.printf("Hz:%.1f Thr:%.0fW", freq, overloadThreshold);
-  display.drawLine(0, 43, 127, 43, WHITE);
-  display.setCursor(0, 47); display.printf("E:%.4f kWh", kwh);
-  display.setCursor(0, 57);
+
+  // Data sensor
+  display.setCursor(0,13); display.printf("V:%.1fV  I:%.2fA", v, i);
+  display.setCursor(0,23); display.printf("P:%.1fW  PF:%.2f", p, pf);
+  display.setCursor(0,33); display.printf("Hz:%.1f Thr:%.0fW", hz, overloadThreshold);
+  display.drawLine(0,43,127,43,WHITE);
+  display.setCursor(0,47); display.printf("E:%.4f kWh", kwh);
+  display.setCursor(0,57);
   if (cost >= 1000) display.printf("Rp %.0f", cost);
   else              display.printf("Rp %.1f", cost);
   display.display();
@@ -467,66 +852,72 @@ void oledData(float v, float i, float p, float pf, float freq,
 // SETUP
 // ================================================================
 void setup() {
-  Serial.begin(115200);
-  pinMode(PIN_LED_WIFI,   OUTPUT);
-  pinMode(PIN_LED_GREEN,  OUTPUT);
-  pinMode(PIN_LED_RED,    OUTPUT);
-  pinMode(PIN_BUZZER,     OUTPUT);
-  pinMode(PIN_RELAY,      OUTPUT);
-  pinMode(PIN_RESET_WIFI, INPUT_PULLUP);
-  digitalWrite(PIN_LED_WIFI,  LOW);
-  digitalWrite(PIN_LED_GREEN, LOW);
-  digitalWrite(PIN_LED_RED,   LOW);
-  digitalWrite(PIN_BUZZER,    LOW);
+  Serial.begin(115200); delay(100);
+  Serial.println("\n[Boot] Smart Energy Monitor v3.0");
 
-  // BOOT: relay OFF - tunggu "Siapkan Pengukuran Baru" dari web
-  setRelay(false);
-  // Green nyala segera - tanda ESP32 hidup
-  digitalWrite(PIN_LED_GREEN, HIGH);
+  pinMode(PIN_LED_BLUE,   OUTPUT); pinMode(PIN_LED_GREEN, OUTPUT);
+  pinMode(PIN_LED_RED,    OUTPUT); pinMode(PIN_BUZZER,    OUTPUT);
+  pinMode(PIN_RELAY,      OUTPUT); pinMode(PIN_RESET_WIFI, INPUT_PULLUP);
+
+  digitalWrite(PIN_LED_BLUE, LOW); digitalWrite(PIN_LED_GREEN, LOW);
+  digitalWrite(PIN_LED_RED,  LOW); digitalWrite(PIN_BUZZER,    LOW);
+  digitalWrite(PIN_RELAY, RELAY_OFF); relayOn = false;
 
   pzemSerial.begin(9600, SERIAL_8N1, 16, 17);
   loadPrefs();
+  loadSessionFromPrefs();
 
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED gagal");
-  } else {
-    oledSplash();
-    delay(2000);
-  }
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
+    Serial.println("[OLED] Init gagal");
+  else { oledSplash(); delay(2000); }
 
   checkResetButton();
+
+  // ── Mode AP+STA: AP selalu aktif, STA untuk internet ──────
+  WiFi.mode(WIFI_AP_STA);
+  startLocalAP();
+  setupWebServer();
+
+  // Tampilkan info AP sebentar di OLED
+  oledStatus("AP: SEM-Config", "pw: 12345678");
+  delay(1500);
+
+  // Coba connect WiFi STA
   oledStatus("Connecting WiFi...", "");
   wifiConnected = tryConnectWiFi(20);
 
   if (!wifiConnected) {
-    digitalWrite(PIN_LED_GREEN, LOW);
+    // Tidak ada kredensial tersimpan → buka portal WiFiManager
+    // (sementara AP SEM-Config digantikan oleh portal "SEM-Setup")
     startWiFiManager();
+    // Setelah portal selesai, restart AP SEM-Config kembali
+    startLocalAP();
   }
 
   if (wifiConnected) {
+    modeOffline = false;
     WiFi.setSleep(false);
-    digitalWrite(PIN_LED_GREEN, HIGH);
     oledStatus("WiFi OK", "Sync NTP...");
     ntpSynced = tryNTPSync();
-    oledStatus("WiFi OK", ntpSynced ? "NTP Synced" : "NTP Gagal");
-    delay(1500);
+    delay(800);
     syncThresholdFromFirebase();
-    // Clear command lama supaya relay tidak bereaksi terhadap command sisa
     clearFirebaseCommand();
-    Serial.println("[Boot] Firebase command di-clear, relay OFF, siap terima perintah");
-    // Kirim status awal ke Firebase
-    unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-    sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, false, false, ts);
+    unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
+    sendToFirebase(0,0,0,0,0,0,0,false,false,false,ts);
+    Serial.println("[Boot] Online — relay OFF, tunggu perintah web");
   } else {
-    digitalWrite(PIN_LED_GREEN, LOW);
-    oledStatus("Mode OFFLINE", "Retry in 60s");
-    delay(2000);
+    modeOffline = true; offlineStartMs = millis();
+    sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
+    hadDataOnce=false; disconnectCount=0; isOverload=false;
+    overloadAlertLinger=false;
+    setRelay(true, "mode offline otomatis");
+    oledStatus("Mode OFFLINE", "Relay ON - Siap ukur");
+    delay(1500);
     lastReconnectMs = millis();
+    Serial.println("[Boot] Offline — relay ON, AP: 192.168.4.1");
   }
 
-  lastLoopMs          = millis();
-  lastThresholdSyncMs = millis();
-  lastCommandPollMs   = millis();
+  lastLoopMs = lastThresholdSyncMs = lastCommandPollMs = millis();
 }
 
 // ================================================================
@@ -535,69 +926,70 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  checkResetButton();
-  handleWifiLed();
-  handleBuzzer();
-  handleRgbLed();
+  // ── Webserver handle client ────────────────────────────────
+  localServer.handleClient();
 
-  // ── Reconnect ──
-  if (!wifiConnected && now - lastReconnectMs >= RECONNECT_INTERVAL) {
+  checkResetButton();
+  handleBlueLed();
+  handleGreenLed();
+  handleOverloadAlert();
+
+  // ── Deteksi WiFi putus (runtime) ──────────────────────────
+  if (wifiConnected && WiFi.status() != WL_CONNECTED) {
+    wifiConnected = false;
+    if (!modeOffline) offlineStartMs = now;
+    modeOffline = true;
+    digitalWrite(PIN_LED_BLUE, LOW);
     lastReconnectMs = now;
-    oledStatus("Reconnecting...", "");
-    wifiConnected = tryConnectWiFi(15);
-    if (wifiConnected) {
-      WiFi.setSleep(false);
-      if (!ntpSynced) ntpSynced = tryNTPSync();
-      syncThresholdFromFirebase();
-      oledStatus("WiFi Kembali!", "");
-      delay(1000);
-    } else {
-      oledStatus("Mode OFFLINE", "Retry in 60s");
-      delay(1000);
+    Serial.println("[WiFi] Terputus");
+    if (relayOn && hadDataOnce) { saveSessionToPrefs(); Serial.println("[Session] → flash"); }
+    if (!relayOn) {
+      sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
+      hadDataOnce=false; disconnectCount=0; isOverload=false; overloadAlertLinger=false;
+      setRelay(true, "mode offline (WiFi putus)");
     }
   }
 
-  // ── Deteksi WiFi putus ──
-  if (wifiConnected && WiFi.status() != WL_CONNECTED) {
-    wifiConnected = false;
+  // ── Reconnect otomatis setiap 60 detik ────────────────────
+  if (!wifiConnected && now - lastReconnectMs >= RECONNECT_INTERVAL) {
     lastReconnectMs = now;
-    digitalWrite(PIN_LED_WIFI, LOW);
+    wifiConnected = tryConnectWiFi(15);
+    if (wifiConnected) {
+      modeOffline = false; WiFi.setSleep(false);
+      if (!ntpSynced) ntpSynced = tryNTPSync();
+      syncThresholdFromFirebase();
+      unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now/1000;
+      sendToFirebase(lastV, lastI, lastP, lastPF, lastHz,
+                     sessionKwh, sessionCost,
+                     deviceConnected, isOverload, relayOn, ts);
+      Serial.printf("[WiFi] Online! Offline %.0fs\n", (float)(now-offlineStartMs)/1000);
+      oledStatus("WiFi Kembali!", "Data dikirim...");
+      delay(800);
+    }
   }
 
-  // ── Sync threshold setiap 30 detik ──
+  // ── Sync threshold dari Firebase (online) ─────────────────
   if (wifiConnected && now - lastThresholdSyncMs >= THRESHOLD_SYNC_INTERVAL) {
     lastThresholdSyncMs = now;
     syncThresholdFromFirebase();
   }
 
-  // ── Poll command relay dari Firebase setiap 2 detik ──
-  if (wifiConnected && now - lastCommandPollMs >= COMMAND_POLL_INTERVAL) {
+  // ── Poll command relay dari Firebase (online saja) ─────────
+  if (wifiConnected && !modeOffline && now - lastCommandPollMs >= COMMAND_POLL_INTERVAL) {
     lastCommandPollMs = now;
     pollCommandFromFirebase();
   }
 
-  // ── Sensor loop setiap 5 detik ──
+  // ── Sensor loop setiap 5 detik ────────────────────────────
   if (now - lastLoopMs < LOOP_INTERVAL) return;
-  float deltaT_hours = (float)(now - lastLoopMs) / 3600000.0f;
+  float dT = (float)(now - lastLoopMs) / 3600000.0f;
   lastLoopMs = now;
 
-  // Relay OFF: kirim status ke Firebase lalu skip baca sensor
-  if (!relayOn) {
-    if (wifiConnected) {
-      unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now / 1000;
-      sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, false, false, ts);
-    }
-    oledData(0, 0, 0, 0, 0, 0, 0, false, wifiConnected, false, false);
-    return;
-  }
-
-  // ── Baca sensor PZEM ──
   float voltage   = pzem.voltage();
   float current   = pzem.current();
   float power     = pzem.power();
   float pf        = pzem.pf();
   float frequency = pzem.frequency();
-
   if (isnan(voltage))   voltage   = 0;
   if (isnan(current))   current   = 0;
   if (isnan(power))     power     = 0;
@@ -606,38 +998,42 @@ void loop() {
 
   deviceConnected = (current > 0.01f && power > 0.5f);
 
-  if (deviceConnected && !prevDevConn) {
-    sessionEnergyWh = 0.0f; sessionKwh = 0.0f; sessionCost = 0.0f;
-  }
-  if (!deviceConnected && prevDevConn) {
-    sessionEnergyWh = 0.0f; sessionKwh = 0.0f; sessionCost = 0.0f;
-  }
-  prevDevConn = deviceConnected;
-
   if (deviceConnected) {
-    sessionEnergyWh += power * deltaT_hours;
+    lastV = voltage; lastI = current; lastP = power;
+    lastPF = pf; lastHz = frequency; hadDataOnce = true;
+  }
+
+  handleDeviceDisconnect();
+  handleOverload(power);
+
+  if (deviceConnected && relayOn && !isOverload) {
+    sessionEnergyWh += power * dT;
     sessionKwh       = sessionEnergyWh / 1000.0f;
     sessionCost      = sessionKwh * tarif;
   }
 
-  isOverload = deviceConnected && (power >= overloadThreshold);
+  // Simpan ke flash saat offline
+  if (!wifiConnected && relayOn && hadDataOnce) saveSessionToPrefs();
 
-  Serial.println("===========================");
-  Serial.printf("WiFi    : %s\n",  wifiConnected   ? "Online"     : "Offline");
-  Serial.printf("Relay   : %s\n",  relayOn         ? "ON"         : "OFF");
-  Serial.printf("Device  : %s\n",  deviceConnected ? "Connected"  : "Not Connected");
-  Serial.printf("V:%.1fV  I:%.2fA  P:%.1fW\n", voltage, current, power);
-  Serial.printf("PF:%.2f  Hz:%.1f\n", pf, frequency);
-  Serial.printf("E:%.4f kWh  Cost:Rp%.0f\n", sessionKwh, sessionCost);
-  Serial.printf("Overload: %s (%.0fW thr / %.1fW aktual)\n",
-    isOverload ? "YES" : "no", overloadThreshold, power);
+  prevDevConn = deviceConnected;
 
+  // Serial debug
+  Serial.printf("[%s] Relay:%s Dev:%s V:%.1f I:%.2f P:%.1f E:%.4f Ovl:%s Thr:%.0f\n",
+    modeOffline?"OFF":"ONL", relayOn?"ON":"OFF", deviceConnected?"Y":"N",
+    voltage, current, power, sessionKwh, isOverload?"YES":"no", overloadThreshold);
+
+  // OLED
+  unsigned long offMs = modeOffline ? (now - offlineStartMs) : 0;
   oledData(voltage, current, power, pf, frequency,
-           sessionKwh, sessionCost, deviceConnected, wifiConnected, isOverload, relayOn);
+           sessionKwh, sessionCost,
+           deviceConnected, wifiConnected,
+           isOverload, relayOn, modeOffline, offMs);
 
+  // Firebase
   if (wifiConnected) {
-    unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now / 1000;
+    unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now/1000;
     sendToFirebase(voltage, current, power, pf, frequency,
-                   sessionKwh, sessionCost, deviceConnected, isOverload, relayOn, ts);
+                   sessionKwh, sessionCost,
+                   deviceConnected, isOverload, relayOn, ts);
   }
 }
