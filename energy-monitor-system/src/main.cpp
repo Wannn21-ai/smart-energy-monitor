@@ -718,7 +718,7 @@ void handleBlueLed() {
 
 void handleGreenLed() {
   // Nyala saat V>0 dan I>0 (device terhubung), mati jika tidak ada
-  digitalWrite(PIN_LED_GREEN, deviceConnected ? HIGH : LOW);
+  digitalWrite(PIN_LED_GREEN, (sessionActive && relayOn) ? HIGH : LOW);
 }
 
 // LED Merah + Buzzer sinkron:

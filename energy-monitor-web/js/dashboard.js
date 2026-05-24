@@ -569,18 +569,9 @@ async function openModalManual() {
   if (!systemOnline) {
     showToast("ESP32 tidak terhubung ke internet", "error"); return;
   }
-  if (!firebaseRelay) {
-    showToast("Relay sedang OFF — mengirim perintah ON...", "");
-    await sendRelayCommand(true);
-    // Modal akan muncul otomatis saat device terdeteksi
+  if (isRunning && !deviceOnline) {
+    showToast(`"${activeDevice.name}" sedang dimonitor`, "error");
     return;
-  }
-  if (!deviceOnline) {
-    showToast("Relay ON — silakan colokkan device ke stopkontak", "");
-    return;
-  }
-  if (isRunning && activeDevice) {
-    showToast(`"${activeDevice.name}" sedang dimonitor`, "error"); return;
   }
   waitingForName = false;
   const history   = await getHistory();
@@ -588,12 +579,29 @@ async function openModalManual() {
   document.querySelector("#modal-add-device .modal-title")
     .textContent = "Tambah Device";
   document.querySelector("#modal-add-device .modal-sub")
-    .textContent = "Berikan nama untuk device yang terhubung.";
+    .textContent = "Berikan nama device, lalu klik Start Monitoring untuk menyalakan relay.";
   inputDevName.value = "";
   inputDevName.dataset.usedNames = JSON.stringify(usedNames);
   modalAdd.classList.add("open");
   setTimeout(() => inputDevName.focus(), 100);
 }
+
+// Ganti handler btnSaveDev
+btnSaveDev.addEventListener("click", async () => {
+  const usedNames = JSON.parse(inputDevName.dataset.usedNames || "[]");
+  let name = inputDevName.value.trim();
+  if (!name) name = generateUniqueName("Device", usedNames);
+  else name = generateUniqueName(name, usedNames);
+  if (name.length > 24) { showToast("Maksimal 24 karakter", "error"); return; }
+  closeModal();
+
+  // Relay ON dulu, lalu tunggu device terdeteksi sebelum startMonitoring
+  showToast(`Menyalakan relay untuk "${name}"...`, "");
+  await sendRelayCommand(true);
+
+  // Simpan nama sementara, startMonitoring dipanggil saat device terdeteksi
+  pendingDeviceName = name;
+});
 
 function closeModal() {
   modalAdd.classList.remove("open");
@@ -741,14 +749,22 @@ function updateMeters() {
 
   // ── Device baru terdeteksi ─────────────────────────────
   // Kondisi: relay ON, ada arus, belum ada sesi
+
+  let pendingDeviceName = null;
   if (!prevDeviceConnected && deviceOnline) {
     deviceConnectTime   = Date.now();
     deviceConnectEnergy = firebaseEnergy;
     lastknownEnergy     = firebaseEnergy;
-    if (!isRunning && !waitingForName) {
-      if (settings.notifDevice)
-        showToast("⚡ Device terdeteksi! Berikan nama.", "success");
-      openModalAuto();
+    if (!isRunning) {
+      if (pendingDeviceName) {
+        const name = pendingDeviceName;
+        pendingDeviceName = null;
+        await startMonitoring(name);
+      }else if (!waitingForName) {
+        if (settings.notifConnect)
+          showToast("⚡ Device terdeteksi! Berikan nama.", "success");
+        openModalAuto();
+      }
     }
   }
 
