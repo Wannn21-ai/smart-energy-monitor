@@ -670,8 +670,8 @@ function step1() {
 function step2() {
   var thr = parseFloat(document.getElementById('thr').value);
   var trf = parseFloat(document.getElementById('trf').value);
-  if (isNaN(thr) || thr < 100 || thr > 10000) {
-    toast('Threshold harus antara 100–10000 Watt', 'err'); return;
+  if (isNaN(thr) || thr < 0 || thr > 10000) {
+    toast('Threshold harus antara 0–10000 Watt', 'err'); return;
   }
   if (isNaN(trf) || trf <= 0) {
     toast('Masukkan tarif yang valid', 'err'); return;
@@ -717,8 +717,8 @@ function showDone() {
       .then(function(d) {
         document.getElementById('done-ip').innerHTML =
           'IP: <b>' + (d.ip || '—') + '</b><br>' +
-          'Dashboard: <a href="https://smart-energy-monitoring.netlify.app" ' +
-          'style="color:#00e5ff">smart-energy-monitoring.netlify.app</a>';
+          'Dashboard: <a href="https://gridwatch-system.vercel.app/" ' +
+          'style="color:#00e5ff">gridwatch-system.vercel.app</a>';
       }).catch(function() {
         document.getElementById('done-ip').textContent = 'Konfigurasi tersimpan ✓';
       });
