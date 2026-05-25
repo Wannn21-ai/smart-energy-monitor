@@ -8,6 +8,8 @@
 #include <Adafruit_SSD1306.h>
 #include <PZEM004Tv30.h>
 #include <DNSServer.h>
+#include <LittleFS.h>          // ① LittleFS
+#include <ArduinoJson.h>       // ① JSON baca/tulis file
 
 // ================================================================
 // PIN DEFINITIONS
@@ -24,7 +26,6 @@
 
 // ================================================================
 // LOCAL AP & WEBSERVER
-// AP always active (WIFI_AP_STA), webserver at 192.168.4.1
 // ================================================================
 DNSServer dnsServer;
 const byte DNS_PORT = 53;
@@ -63,14 +64,20 @@ Preferences prefs;
 const float  TARIF_DEFAULT     = 1444.70f;
 const float  THRESHOLD_DEFAULT = 2000.0f;
 
-const unsigned long LOOP_INTERVAL           = 5000;
-const unsigned long RECONNECT_INTERVAL      = 60000;
-const unsigned long THRESHOLD_SYNC_INTERVAL = 30000;
-const unsigned long COMMAND_POLL_INTERVAL   = 2000;
-const unsigned long OVERLOAD_BLINK_MS       = 200;
-const unsigned long OVERLOAD_ALERT_LINGER   = 10000;
+const unsigned long LOOP_INTERVAL             = 5000;
+const unsigned long RECONNECT_INTERVAL        = 60000;
+const unsigned long THRESHOLD_SYNC_INTERVAL   = 30000;
+const unsigned long COMMAND_POLL_INTERVAL      = 2000;
+const unsigned long OVERLOAD_BLINK_MS          = 200;
+const unsigned long OVERLOAD_ALERT_LINGER      = 10000;
+const unsigned long CHECKPOINT_INTERVAL        = 30000;  // ① auto-save tiap 30 detik
+const unsigned long OFFLINE_SYNC_RETRY_INTERVAL = 15000; // ④ retry sync offline history
 
 const int DISCONNECT_THRESHOLD = 2;
+
+// ① LittleFS paths
+#define FS_SESSION_PATH  "/session_active.json"
+#define FS_HISTORY_PATH  "/history_offline.json"
 
 // ================================================================
 // STATE — SYSTEM
@@ -102,16 +109,22 @@ float sessionKwh        = 0.0f;
 float sessionCost       = 0.0f;
 bool  sessionActive     = false;
 
+// ③ Nama device & durasi untuk session recovery
+char  sessionDeviceName[32] = "";
+unsigned long sessionStartTs = 0;   // Unix timestamp atau millis/1000
+
 float lastV = 0, lastI = 0, lastP = 0, lastPF = 0, lastHz = 0;
 bool  hadDataOnce = false;
 
 // ================================================================
 // TIMING
 // ================================================================
-unsigned long lastLoopMs          = 0;
-unsigned long lastReconnectMs     = 0;
-unsigned long lastThresholdSyncMs = 0;
-unsigned long lastCommandPollMs   = 0;
+unsigned long lastLoopMs              = 0;
+unsigned long lastReconnectMs         = 0;
+unsigned long lastThresholdSyncMs     = 0;
+unsigned long lastCommandPollMs       = 0;
+unsigned long lastCheckpointMs        = 0;   // ① checkpoint timer
+unsigned long lastOfflineSyncRetryMs  = 0;   // ④ sync retry timer
 
 unsigned long lastBlinkMs         = 0;
 bool          blinkState          = false;
@@ -122,7 +135,19 @@ bool          overloadBlinkState  = false;
 // FORWARD DECLARATIONS
 // ================================================================
 void loadPrefs(); void savePrefs();
-void saveSessionToPrefs(); void loadSessionFromPrefs(); void clearSessionPrefs();
+
+// ① LittleFS helpers
+bool   fsInit();
+void   fsWriteSession();
+void   fsClearSession();
+bool   fsReadSession(float &outEnergyWh, float &outKwh, float &outCost,
+                     char *outName, unsigned long &outStartTs);
+void   fsAppendOfflineHistory(const char* name, unsigned long startTs,
+                              unsigned long endTs, float energyKwh,
+                              float cost, float avgPower, bool wasOverload);
+bool   fsSyncOfflineHistoryToFirebase();
+int    fsCountOfflineHistory();
+
 bool tryConnectWiFi(int sec = 20); bool tryNTPSync();
 void startLocalAP(); void setupWebServer();
 void setRelay(bool on, const char* reason = "");
@@ -130,6 +155,9 @@ void handleDeviceDisconnect(); void handleOverload(float power);
 bool sendToFirebase(float v, float i, float p, float pf, float freq,
                     float kwh, float cost, bool dev, bool ovl,
                     bool relay, unsigned long ts);
+bool pushHistoryToFirebase(const char* name, const char* duration,
+                           float avgPower, float energyKwh, float cost,
+                           unsigned long ts, bool recovered, bool wasOverload);
 void syncThresholdFromFirebase(); void pollCommandFromFirebase();
 void clearFirebaseCommand();
 void handleBlueLed(); void handleGreenLed(); void handleOverloadAlert();
@@ -138,6 +166,237 @@ void oledSplash(); void oledStatus(const char* l1, const char* l2 = "");
 void oledData(float v, float i, float p, float pf, float hz, float kwh,
               float cost, bool dev, bool online, bool ovl, bool relay,
               bool offline, unsigned long offMs);
+String buildDuration(unsigned long startTs, unsigned long nowTs);
+
+// ================================================================
+// ① LittleFS INIT
+// ================================================================
+bool fsInit() {
+  if (!LittleFS.begin(true)) {
+    Serial.println("[FS] LittleFS mount gagal — format ulang");
+    if (!LittleFS.begin(true)) {
+      Serial.println("[FS] Format gagal");
+      return false;
+    }
+  }
+  Serial.println("[FS] LittleFS OK");
+  return true;
+}
+
+// ================================================================
+// ① WRITE SESSION CHECKPOINT → session_active.json
+// Format: {"name":"...","start":ts,"energy_wh":x,"kwh":x,"cost":x}
+// ================================================================
+void fsWriteSession() {
+  if (!sessionActive || strlen(sessionDeviceName) == 0) return;
+
+  StaticJsonDocument<256> doc;
+  doc["name"]      = sessionDeviceName;
+  doc["start"]     = sessionStartTs;
+  doc["energy_wh"] = sessionEnergyWh;
+  doc["kwh"]       = sessionKwh;
+  doc["cost"]      = sessionCost;
+  doc["relay"]     = relayOn;
+
+  File f = LittleFS.open(FS_SESSION_PATH, "w");
+  if (!f) { Serial.println("[FS] Gagal tulis session"); return; }
+  serializeJson(doc, f);
+  f.close();
+  Serial.printf("[FS] Checkpoint: %s %.4f kWh\n", sessionDeviceName, sessionKwh);
+}
+
+// ================================================================
+// ① CLEAR SESSION FILE
+// ================================================================
+void fsClearSession() {
+  if (LittleFS.exists(FS_SESSION_PATH)) {
+    LittleFS.remove(FS_SESSION_PATH);
+    Serial.println("[FS] session_active.json dihapus");
+  }
+}
+
+// ================================================================
+// ① READ SESSION FILE → return true jika ada data valid
+// ================================================================
+bool fsReadSession(float &outEnergyWh, float &outKwh, float &outCost,
+                   char *outName, unsigned long &outStartTs) {
+  if (!LittleFS.exists(FS_SESSION_PATH)) return false;
+
+  File f = LittleFS.open(FS_SESSION_PATH, "r");
+  if (!f) return false;
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, f);
+  f.close();
+
+  if (err) {
+    Serial.printf("[FS] JSON error: %s\n", err.c_str());
+    LittleFS.remove(FS_SESSION_PATH);
+    return false;
+  }
+
+  outEnergyWh = doc["energy_wh"] | 0.0f;
+  outKwh      = doc["kwh"]       | 0.0f;
+  outCost     = doc["cost"]      | 0.0f;
+  outStartTs  = doc["start"]     | (unsigned long)0;
+  strlcpy(outName, doc["name"] | "Recovered", 32);
+
+  if (outKwh <= 0 && outEnergyWh <= 0) {
+    LittleFS.remove(FS_SESSION_PATH);
+    return false;
+  }
+  return true;
+}
+
+// ================================================================
+// ① APPEND SESI SELESAI → history_offline.json
+// File berisi JSON array dari sesi-sesi yang perlu di-push ke Firebase
+// ================================================================
+void fsAppendOfflineHistory(const char* name, unsigned long startTs,
+                            unsigned long endTs, float energyKwh,
+                            float cost, float avgPower, bool wasOverload) {
+  // Baca array yang sudah ada
+  DynamicJsonDocument doc(4096);
+  JsonArray arr;
+
+  if (LittleFS.exists(FS_HISTORY_PATH)) {
+    File f = LittleFS.open(FS_HISTORY_PATH, "r");
+    if (f) {
+      DeserializationError err = deserializeJson(doc, f);
+      f.close();
+      if (!err && doc.is<JsonArray>()) {
+        arr = doc.as<JsonArray>();
+      } else {
+        doc.clear();
+        arr = doc.to<JsonArray>();
+      }
+    }
+  } else {
+    arr = doc.to<JsonArray>();
+  }
+
+  // Buat entri baru
+  JsonObject entry = arr.createNestedObject();
+  entry["name"]      = name;
+  entry["start_ts"]  = startTs;
+  entry["end_ts"]    = endTs;
+  entry["kwh"]       = energyKwh;
+  entry["cost"]      = cost;
+  entry["power"]     = avgPower;
+  entry["overload"]  = wasOverload;
+
+  // Tulis kembali
+  File f = LittleFS.open(FS_HISTORY_PATH, "w");
+  if (!f) { Serial.println("[FS] Gagal tulis offline history"); return; }
+  serializeJson(doc, f);
+  f.close();
+  Serial.printf("[FS] Offline history: '%s' %.4f kWh disimpan\n", name, energyKwh);
+}
+
+// ================================================================
+// ④ SYNC OFFLINE HISTORY → Firebase, return true jika semua berhasil
+// ================================================================
+bool fsSyncOfflineHistoryToFirebase() {
+  if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
+  if (!LittleFS.exists(FS_HISTORY_PATH)) return true; // tidak ada yang perlu di-sync
+
+  File f = LittleFS.open(FS_HISTORY_PATH, "r");
+  if (!f) return false;
+
+  DynamicJsonDocument doc(4096);
+  DeserializationError err = deserializeJson(doc, f);
+  f.close();
+
+  if (err || !doc.is<JsonArray>()) {
+    Serial.println("[FS] history_offline.json corrupt — hapus");
+    LittleFS.remove(FS_HISTORY_PATH);
+    return true;
+  }
+
+  JsonArray arr = doc.as<JsonArray>();
+  if (arr.size() == 0) {
+    LittleFS.remove(FS_HISTORY_PATH);
+    return true;
+  }
+
+  Serial.printf("[Sync] Mulai sync %d sesi offline ke Firebase\n", arr.size());
+  oledStatus("Sync offline", "history...");
+
+  int pushed = 0;
+  for (JsonObject entry : arr) {
+    const char*   name      = entry["name"]     | "Offline Device";
+    unsigned long startTs   = entry["start_ts"] | (unsigned long)0;
+    unsigned long endTs     = entry["end_ts"]   | (unsigned long)0;
+    float         kwh       = entry["kwh"]      | 0.0f;
+    float         cost      = entry["cost"]     | 0.0f;
+    float         avgPower  = entry["power"]    | 0.0f;
+    bool          wasOvl    = entry["overload"] | false;
+
+    // Buat string durasi dari startTs - endTs
+    String dur = buildDuration(startTs, endTs);
+
+    bool ok = pushHistoryToFirebase(name, dur.c_str(), avgPower, kwh, cost,
+                                    endTs > 0 ? endTs : startTs,
+                                    true,   // recovered = true → badge "⚡ Recovered"
+                                    wasOvl);
+    if (!ok) {
+      Serial.printf("[Sync] Push '%s' gagal — henti, coba lagi nanti\n", name);
+      break;
+    }
+    pushed++;
+    delay(300); // jeda kecil antar push
+  }
+
+  if (pushed == (int)arr.size()) {
+    LittleFS.remove(FS_HISTORY_PATH);
+    Serial.printf("[Sync] Semua %d sesi offline berhasil di-sync\n", pushed);
+    return true;
+  }
+
+  // Jika sebagian berhasil, hapus entri yang sudah di-push dari array
+  if (pushed > 0) {
+    DynamicJsonDocument newDoc(4096);
+    JsonArray newArr = newDoc.to<JsonArray>();
+    int idx = 0;
+    for (JsonObject entry : arr) {
+      if (idx >= pushed) {
+        newArr.add(entry);
+      }
+      idx++;
+    }
+    File fw = LittleFS.open(FS_HISTORY_PATH, "w");
+    if (fw) { serializeJson(newDoc, fw); fw.close(); }
+    Serial.printf("[Sync] %d/%d sesi berhasil, sisanya disimpan\n", pushed, (int)arr.size());
+  }
+  return false;
+}
+
+// ================================================================
+// Count entri history offline
+// ================================================================
+int fsCountOfflineHistory() {
+  if (!LittleFS.exists(FS_HISTORY_PATH)) return 0;
+  File f = LittleFS.open(FS_HISTORY_PATH, "r");
+  if (!f) return 0;
+  DynamicJsonDocument doc(4096);
+  if (deserializeJson(doc, f) || !doc.is<JsonArray>()) { f.close(); return 0; }
+  f.close();
+  return doc.as<JsonArray>().size();
+}
+
+// ================================================================
+// HELPER — build duration string dari dua Unix timestamp
+// ================================================================
+String buildDuration(unsigned long startTs, unsigned long endTs) {
+  if (endTs <= startTs) return "00:00:00";
+  unsigned long secs = endTs - startTs;
+  unsigned long h = secs / 3600;
+  unsigned long m = (secs % 3600) / 60;
+  unsigned long s = secs % 60;
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", h, m, s);
+  return String(buf);
+}
 
 // ================================================================
 // PREFERENCES
@@ -154,40 +413,6 @@ void savePrefs() {
   prefs.putFloat("tarif",     tarif);
   prefs.end();
 }
-void saveSessionToPrefs() {
-  prefs.begin("session", false);
-  prefs.putFloat("energyWh", sessionEnergyWh);
-  prefs.putFloat("kwh",      sessionKwh);
-  prefs.putFloat("cost",     sessionCost);
-  prefs.putFloat("lastV",    lastV);
-  prefs.putFloat("lastI",    lastI);
-  prefs.putFloat("lastP",    lastP);
-  prefs.putBool ("hadData",  hadDataOnce);
-  prefs.putBool ("relayOn",  relayOn);
-  prefs.putBool ("active",   sessionActive);
-  prefs.end();
-}
-void loadSessionFromPrefs() {
-  prefs.begin("session", true);
-  if (prefs.getBool("active", false) && prefs.getBool("relayOn", false)) {
-    sessionEnergyWh = prefs.getFloat("energyWh", 0);
-    sessionKwh      = prefs.getFloat("kwh",      0);
-    sessionCost     = prefs.getFloat("cost",     0);
-    lastV           = prefs.getFloat("lastV",    0);
-    lastI           = prefs.getFloat("lastI",    0);
-    lastP           = prefs.getFloat("lastP",    0);
-    hadDataOnce     = prefs.getBool ("hadData",  false);
-    sessionActive   = true;
-    Serial.printf("[Session] Restored: %.4f kWh Rp%.0f\n", sessionKwh, sessionCost);
-  }
-  prefs.end();
-}
-void clearSessionPrefs() {
-  prefs.begin("session", false);
-  prefs.putFloat("energyWh", 0); prefs.putFloat("kwh", 0); prefs.putFloat("cost", 0);
-  prefs.putBool("hadData", false); prefs.putBool("relayOn", false); prefs.putBool("active", false);
-  prefs.end();
-}
 
 // ================================================================
 // RELAY
@@ -195,8 +420,14 @@ void clearSessionPrefs() {
 void setRelay(bool on, const char* reason) {
   relayOn = on;
   digitalWrite(PIN_RELAY, on ? RELAY_ON : RELAY_OFF);
-  if (!on) { sessionActive = false; disconnectCount = 0; clearSessionPrefs(); }
-  else      { sessionActive = true; }
+  if (!on) {
+    sessionActive = false;
+    disconnectCount = 0;
+    // Hapus session_active.json saat relay OFF (sesi selesai)
+    fsClearSession();
+  } else {
+    sessionActive = true;
+  }
   Serial.printf("[Relay] %s — %s\n", on ? "ON" : "OFF", reason);
 }
 
@@ -209,13 +440,29 @@ void handleDeviceDisconnect() {
     disconnectCount++;
     Serial.printf("[Disconnect] %d/%d\n", disconnectCount, DISCONNECT_THRESHOLD);
     if (disconnectCount >= DISCONNECT_THRESHOLD) {
-      Serial.println("[Disconnect] Device dicabut — relay OFF");
+      Serial.println("[Disconnect] Device dicabut — relay OFF, simpan sesi");
+
+      // Simpan sesi ke history
+      unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
       if (wifiConnected) {
-        unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
-        sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, true, ts);
+        String dur = buildDuration(sessionStartTs, nowTs);
+        pushHistoryToFirebase(
+          sessionDeviceName, dur.c_str(),
+          lastP, sessionKwh, sessionCost,
+          nowTs, false, false
+        );
+        sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, true, nowTs);
+      } else {
+        // Simpan ke LittleFS untuk di-sync nanti
+        fsAppendOfflineHistory(
+          sessionDeviceName, sessionStartTs, nowTs,
+          sessionKwh, sessionCost, lastP, false
+        );
       }
+
       setRelay(false, "device dicabut");
-      sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0; hadDataOnce = false;
+      sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
+      hadDataOnce = false; sessionDeviceName[0] = '\0';
     }
   } else if (deviceConnected) {
     disconnectCount = 0;
@@ -230,10 +477,28 @@ void handleOverload(float power) {
   if (newOvl && !isOverload) {
     isOverload = true;
     Serial.printf("[Overload] %.1fW >= %.0fW — relay OFF\n", power, overloadThreshold);
+
+    // Simpan sesi ke history dengan tag overload
+    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
+    if (wifiConnected) {
+      String dur = buildDuration(sessionStartTs, nowTs);
+      pushHistoryToFirebase(
+        sessionDeviceName, dur.c_str(),
+        power, sessionKwh, sessionCost,
+        nowTs, false, true   // wasOverload = true
+      );
+    } else {
+      fsAppendOfflineHistory(
+        sessionDeviceName, sessionStartTs, nowTs,
+        sessionKwh, sessionCost, power, true
+      );
+    }
+
     setRelay(false, "overload");
     overloadAlertLinger = true;
     overloadLingerStart = millis();
     sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
+    sessionDeviceName[0] = '\0';
   } else if (!newOvl && isOverload) {
     isOverload = false;
     Serial.println("[Overload] Teratasi");
@@ -241,7 +506,76 @@ void handleOverload(float power) {
 }
 
 // ================================================================
-// FIREBASE
+// FIREBASE — Push satu sesi ke /users/... history
+// Key unik = timestamp (ms). Badge "⚡ Recovered" jika recovered=true.
+// Badge overload jika wasOverload=true (ditandai di field isOverload).
+// ================================================================
+bool pushHistoryToFirebase(const char* name, const char* duration,
+                           float avgPower, float energyKwh, float cost,
+                           unsigned long ts, bool recovered, bool wasOverload) {
+  if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
+
+  // Format tanggal dari timestamp
+  char dateStr[20] = "";
+  if (ntpSynced && ts > 1000000) {
+    struct tm ti;
+    time_t t = (time_t)ts;
+    localtime_r(&t, &ti);
+    snprintf(dateStr, sizeof(dateStr), "%02d/%02d/%04d",
+             ti.tm_mday, ti.tm_mon + 1, ti.tm_year + 1900);
+  } else {
+    snprintf(dateStr, sizeof(dateStr), "—");
+  }
+
+  // Format cost
+  char costStr[32];
+  if (cost >= 1000)
+    snprintf(costStr, sizeof(costStr), "Rp %lu", (unsigned long)cost);
+  else
+    snprintf(costStr, sizeof(costStr), "Rp %.1f", cost);
+
+  // Buat nama dengan badge jika perlu
+  char displayName[64];
+  if (recovered && wasOverload)
+    snprintf(displayName, sizeof(displayName), "%s ⚡ Recovered ⚠", name);
+  else if (recovered)
+    snprintf(displayName, sizeof(displayName), "%s ⚡ Recovered", name);
+  else
+    strlcpy(displayName, name, sizeof(displayName));
+
+  // Path: /users/global_history/<ts_ms>.json
+  // Catatan: karena tidak ada uid di firmware, pakai /shared_history/
+  // Web harus baca dari path ini untuk history global
+  // (atau bisa juga kirim ke /live dan web yang push ke per-user history)
+  // Untuk saat ini kirim ke /shared_history/<ts>
+  char path[128];
+  snprintf(path, sizeof(path), "/shared_history/%lu.json", (unsigned long)(ts * 1000UL));
+
+  WiFiClientSecure c; c.setInsecure(); c.setTimeout(10000);
+  HTTPClient h;
+  h.begin(c, String(FIREBASE_HOST) + String(path));
+  h.addHeader("Content-Type", "application/json");
+
+  char body[512];
+  snprintf(body, sizeof(body),
+    "{\"name\":\"%s\",\"duration\":\"%s\",\"power\":%.1f,"
+    "\"energy\":%.4f,\"cost\":\"%s\",\"date\":\"%s\","
+    "\"timestamp\":%lu,\"isOverload\":%s,\"recovered\":%s}",
+    displayName, duration, avgPower,
+    energyKwh, costStr, dateStr,
+    (unsigned long)(ts * 1000UL),
+    wasOverload ? "true" : "false",
+    recovered   ? "true" : "false"
+  );
+
+  int code = h.PUT(body);
+  h.end();
+  Serial.printf("[History] Push '%s' → %d\n", displayName, code);
+  return (code == 200 || code == 204);
+}
+
+// ================================================================
+// FIREBASE — Send live data
 // ================================================================
 void clearFirebaseCommand() {
   WiFiClientSecure c; c.setInsecure(); c.setTimeout(5000);
@@ -263,12 +597,28 @@ void pollCommandFromFirebase() {
       sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
       hadDataOnce=false; disconnectCount=0; isOverload=false;
       overloadAlertLinger=false;
+      // ③ Offline mode: nama otomatis dari web command juga pakai generate
+      if (strlen(sessionDeviceName) == 0)
+        strlcpy(sessionDeviceName, "Device", sizeof(sessionDeviceName));
       setRelay(true, "perintah web");
+      unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
+      sessionStartTs = nowTs;
       clearFirebaseCommand();
     } else if (pl == "false" && relayOn) {
+      // Stop session dari web — simpan history dulu
+      unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
+      if (sessionActive && sessionKwh > 0) {
+        String dur = buildDuration(sessionStartTs, nowTs);
+        pushHistoryToFirebase(
+          sessionDeviceName, dur.c_str(),
+          lastP, sessionKwh, sessionCost,
+          nowTs, false, false
+        );
+      }
       setRelay(false, "stop session web");
       sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
       hadDataOnce=false; prevDevConn=false; disconnectCount=0;
+      sessionDeviceName[0] = '\0';
       clearFirebaseCommand();
     }
   } else h.end();
@@ -305,7 +655,8 @@ bool sendToFirebase(float v, float i, float p, float pf, float hz,
   j += ",\"threshold\":" + String(overloadThreshold,0);
   j += ",\"tarif\":"     + String(tarif,2);
   j += ",\"relay\":"     + String(relay ? "true":"false");
-  j += ",\"offline\":"   + String(modeOffline ? "true":"false") + "},";
+  j += ",\"offline\":"   + String(modeOffline ? "true":"false");
+  j += ",\"deviceName\":\"" + String(sessionDeviceName) + "\"},";
   j += "\"connected\":"  + String(dev  ? "true":"false") + ",";
   j += "\"overload\":"   + String(ovl  ? "true":"false") + ",";
   j += "\"device\":{";
@@ -319,8 +670,76 @@ bool sendToFirebase(float v, float i, float p, float pf, float hz,
   j += "\"cost\":"       + String(cost,0)+ ",";
   j += "\"overload\":"   + String(ovl ? "true":"false") + "}}";
   int code = h.PUT(j); h.end();
-  Serial.printf("[FB] %d P=%.1fW E=%.4fkWh\n", code, p, kwh);
+  Serial.printf("[FB] %d P=%.1fW E=%.4fkWh Dev=%s\n", code, p, kwh, sessionDeviceName);
   return (code == 200 || code == 204);
+}
+
+// ================================================================
+// ② SESSION RECOVERY — dipanggil di setup() sebelum monitoring dimulai
+// Jika ada session_active.json:
+//   - Push ke Firebase History dengan badge "⚡ Recovered"
+//   - Hapus file
+//   - Fresh start
+// ================================================================
+void doSessionRecovery() {
+  float recoveredEnergyWh = 0, recoveredKwh = 0, recoveredCost = 0;
+  char  recoveredName[32] = "";
+  unsigned long recoveredStartTs = 0;
+
+  if (!fsReadSession(recoveredEnergyWh, recoveredKwh, recoveredCost,
+                     recoveredName, recoveredStartTs)) {
+    return; // tidak ada sesi yang perlu di-recover
+  }
+
+  Serial.printf("[Recovery] Ditemukan sesi: '%s' %.4f kWh\n",
+                recoveredName, recoveredKwh);
+  oledStatus("Recovery sesi", recoveredName);
+  delay(1500);
+
+  unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
+  String dur = buildDuration(recoveredStartTs, nowTs);
+
+  bool pushed = false;
+  if (wifiConnected) {
+    pushed = pushHistoryToFirebase(
+      recoveredName, dur.c_str(),
+      0.0f,             // avgPower tidak tahu (tidak disimpan di checkpoint sederhana)
+      recoveredKwh, recoveredCost,
+      nowTs, true, false
+    );
+    if (pushed) {
+      Serial.println("[Recovery] Push ke Firebase OK");
+    } else {
+      Serial.println("[Recovery] Push gagal — simpan ke offline history");
+      fsAppendOfflineHistory(
+        recoveredName, recoveredStartTs, nowTs,
+        recoveredKwh, recoveredCost, 0.0f, false
+      );
+    }
+  } else {
+    // Belum online — simpan ke history offline, nanti di-sync
+    fsAppendOfflineHistory(
+      recoveredName, recoveredStartTs, nowTs,
+      recoveredKwh, recoveredCost, 0.0f, false
+    );
+    Serial.println("[Recovery] Simpan ke offline history (belum online)");
+  }
+
+  fsClearSession();
+
+  oledStatus("Recovery selesai", pushed ? "Tersimpan ✓" : "Antri sync");
+  delay(1000);
+}
+
+// ================================================================
+// ③ GENERATE OFFLINE DEVICE NAME — "Offline Device N"
+// ================================================================
+void generateOfflineDeviceName() {
+  // Cek berapa sesi offline yang sudah ada untuk buat nama unik
+  int count = fsCountOfflineHistory();
+  snprintf(sessionDeviceName, sizeof(sessionDeviceName),
+           "Offline Device %d", count + 1);
+  Serial.printf("[Offline] Nama device: %s\n", sessionDeviceName);
 }
 
 // ================================================================
@@ -351,6 +770,15 @@ void handleRoot() {
                 + bar + " " + ssid + (locked ? " 🔒" : "") + "</option>";
   }
   if (n == 0) ssidOptions = "<option value=''>Tidak ada jaringan ditemukan</option>";
+
+  // Hitung jumlah sesi offline yang antri
+  int pendingSync = fsCountOfflineHistory();
+  String syncInfo = "";
+  if (pendingSync > 0) {
+    syncInfo = "<div style='background:rgba(255,171,0,0.1);border:1px solid rgba(255,171,0,0.3);"
+               "border-radius:10px;padding:10px 14px;font-size:12px;color:#ffab00;margin-bottom:14px;'>"
+               "⚡ " + String(pendingSync) + " sesi offline menunggu sync ke Firebase</div>";
+  }
 
   String html = "<!DOCTYPE html><html lang='id'><head>"
     "<meta charset='UTF-8'/>"
@@ -452,24 +880,19 @@ void handleRoot() {
     "</div>";
 
   html += "<div class='steps'>"
-    "<div class='step'>"
-      "<div class='step-dot active'>1</div>"
-      "<div class='step-label'>WiFi</div>"
-    "</div>"
+    "<div class='step'><div class='step-dot active'>1</div>"
+      "<div class='step-label'>WiFi</div></div>"
     "<div class='step-line'></div>"
-    "<div class='step'>"
-      "<div class='step-dot pending'>2</div>"
-      "<div class='step-label'>Tarif</div>"
-    "</div>"
+    "<div class='step'><div class='step-dot pending'>2</div>"
+      "<div class='step-label'>Tarif</div></div>"
     "<div class='step-line'></div>"
-    "<div class='step'>"
-      "<div class='step-dot pending'>3</div>"
-      "<div class='step-label'>Selesai</div>"
-    "</div>"
+    "<div class='step'><div class='step-dot pending'>3</div>"
+      "<div class='step-label'>Selesai</div></div>"
     "</div>";
 
   html += "<div class='card' id='card-wifi'>"
     "<div class='card-title'>📶 &nbsp;Koneksi WiFi</div>"
+    + syncInfo +
     "<div class='fg'>"
       "<label>Pilih Jaringan WiFi</label>"
       "<select id='ssid'>" + ssidOptions + "</select>"
@@ -569,8 +992,7 @@ document.getElementById('trf').addEventListener('input', function() {
 function manualSSID() {
   var w = document.getElementById('manual-wrap');
   w.style.display = w.style.display === 'none' ? 'block' : 'none';
-  if (w.style.display !== 'none')
-    document.getElementById('ssid-manual').focus();
+  if (w.style.display !== 'none') document.getElementById('ssid-manual').focus();
 }
 function step1() {
   var ssidSel = document.getElementById('ssid').value;
@@ -631,9 +1053,8 @@ function step2() {
   fetch('/save?thr=' + thr + '&trf=' + trf)
     .then(function(r) { return r.text(); })
     .then(function(t) {
-      if (t.indexOf('Tersimpan') >= 0) {
-        showDone();
-      } else {
+      if (t.indexOf('Tersimpan') >= 0) { showDone(); }
+      else {
         toast('Gagal menyimpan: ' + t, 'err');
         btn.disabled = false;
         btn.innerHTML = 'Simpan & Selesai ✓';
@@ -668,9 +1089,7 @@ function showDone() {
 }
 function resetWifi() {
   if (!confirm('Reset semua konfigurasi WiFi dan mulai ulang?')) return;
-  fetch('/resetwifi').then(function() {
-    toast('Mereset... ESP32 akan restart', 'info');
-  });
+  fetch('/resetwifi').then(function() { toast('Mereset... ESP32 akan restart', 'info'); });
 }
 document.addEventListener('keydown', function(e) {
   if (e.key !== 'Enter') return;
@@ -738,6 +1157,8 @@ void handleConnectWifi() {
     if (!ntpSynced) ntpSynced = tryNTPSync();
     syncThresholdFromFirebase();
     clearFirebaseCommand();
+    // ④ Coba sync offline history yang antri
+    fsSyncOfflineHistoryToFirebase();
     localServer.send(200, "text/plain",
       "✓ Berhasil! IP: " + ip + " — Dashboard web aktif kembali.");
   } else {
@@ -750,142 +1171,70 @@ void handleConnectWifi() {
 void handleResetWifi() {
   localServer.send(200, "text/plain", "Mereset konfigurasi WiFi — ESP32 restart...");
   delay(500);
-  // Clear saved WiFi credentials from NVS, then restart
-  WiFi.disconnect(true, true);  // disconnect + erase NVS credentials
+  WiFi.disconnect(true, true);
   delay(500);
   ESP.restart();
 }
 
 void handleStatus() {
   String ip = wifiConnected ? WiFi.localIP().toString() : "—";
+  int pending = fsCountOfflineHistory();
   String json = "{\"wifi\":" + String(wifiConnected ? "true":"false") +
                 ",\"ip\":\"" + ip + "\""
                 ",\"threshold\":" + String(overloadThreshold,0) +
-                ",\"tarif\":" + String(tarif,2) + "}";
+                ",\"tarif\":" + String(tarif,2) +
+                ",\"pendingSync\":" + String(pending) + "}";
   localServer.send(200, "application/json", json);
 }
 
-// ================================================================
-// BUG 2 FIX: Captive Portal Response Handlers
-//
-// Root cause: The original code called WiFiManager::startConfigPortal()
-// on first boot. WiFiManager:
-//   1. Switches WiFi mode to AP-only, killing our SEM-Config AP and
-//      all its handlers (/hotspot-detect.html, /generate_204, etc.)
-//   2. Serves its own portal that does NOT correctly respond to OS
-//      captive portal detection probes:
-//        - iOS expects 200 "Success" from /hotspot-detect.html
-//        - Android expects HTTP 204 from /generate_204
-//        - Windows expects "Microsoft NCSI" body from /ncsi.txt
-//      WiFiManager returns full HTML for all of these → OS concludes
-//      "internet works" → no "Sign in to Network" popup appears.
-//
-// Fix: Remove WiFiManager entirely. Our own SEM-Config AP (always
-// running) already has all these handlers registered in setupWebServer().
-// On first boot with no saved credentials, tryConnectWiFi() fails fast,
-// we enter offline mode, and the SEM-Config captive portal is already
-// live and working. The user opens it from the "Sign in to Network"
-// notification that iOS/Android now correctly shows.
-//
-// The handlers below are the key to making captive portal detection work:
-// ================================================================
-
-// iOS/macOS Captive Network Assistant — must return exactly this body
+// Captive portal handlers
 void handleAppleCNA() {
   localServer.send(200, "text/html",
-    "<HTML><HEAD><TITLE>Success</TITLE></HEAD>"
-    "<BODY>Success</BODY></HTML>");
+    "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
 }
-
-// Android — must return HTTP 204 No Content (not a redirect, not HTML)
-void handleAndroid204() {
-  localServer.send(204, "text/plain", "");
-}
-
-// Windows NCSI — must return exactly "Microsoft NCSI"
-void handleWindowsNCsi() {
-  localServer.send(200, "text/plain", "Microsoft NCSI");
-}
-
-// Windows connecttest.txt — must return exactly "Microsoft Connect Test"
-void handleWindowsConnectTest() {
-  localServer.send(200, "text/plain", "Microsoft Connect Test");
-}
-
-// Catch-all: redirect everything else to our setup page
-// This is what makes the browser open automatically on iOS after
-// the "Sign in to Network" banner is tapped
+void handleAndroid204()       { localServer.send(204, "text/plain", ""); }
+void handleWindowsNCsi()      { localServer.send(200, "text/plain", "Microsoft NCSI"); }
+void handleWindowsConnectTest(){ localServer.send(200, "text/plain", "Microsoft Connect Test"); }
 void handleCaptivePortal() {
   localServer.sendHeader("Location", "http://192.168.4.1/", true);
   localServer.send(302, "text/plain", "");
 }
 
 void setupWebServer() {
-  // Main setup page
   localServer.on("/",                HTTP_GET, handleRoot);
   localServer.on("/index.html",      HTTP_GET, handleRoot);
-
-  // ── iOS/macOS Captive Network Assistant ──────────────────────
-  // iOS sends GET /hotspot-detect.html; expects 200 with "Success" body.
-  // If it gets that, it knows internet is available and won't show popup.
-  // We return "Success" only AFTER WiFi is configured (wifiConnected=true).
-  // While we're in setup mode (wifiConnected=false), we return a redirect
-  // so iOS keeps showing the "Sign in to Network" banner.
   localServer.on("/hotspot-detect.html", HTTP_GET, []() {
-    if (wifiConnected) {
-      handleAppleCNA();
-    } else {
-      // Return redirect → iOS shows captive portal notification
-      handleCaptivePortal();
-    }
+    if (wifiConnected) handleAppleCNA(); else handleCaptivePortal();
   });
-  // macOS also checks this path
   localServer.on("/library/test/success.html", HTTP_GET, []() {
     if (wifiConnected) handleAppleCNA(); else handleCaptivePortal();
   });
-  // iOS 14+ also checks this
   localServer.on("/success.txt", HTTP_GET, []() {
-    if (wifiConnected) {
-      localServer.send(200, "text/plain", "success");
-    } else {
-      handleCaptivePortal();
-    }
+    if (wifiConnected) localServer.send(200, "text/plain", "success");
+    else handleCaptivePortal();
   });
-
-  // ── Android Captive Portal Detection ─────────────────────────
-  // Android sends GET /generate_204 and expects HTTP 204 for "no portal".
-  // While in setup mode we return 302 redirect → Android shows notification.
   localServer.on("/generate_204", HTTP_GET, []() {
     if (wifiConnected) handleAndroid204(); else handleCaptivePortal();
   });
   localServer.on("/gen_204", HTTP_GET, []() {
     if (wifiConnected) handleAndroid204(); else handleCaptivePortal();
   });
-  // Newer Android versions
   localServer.on("/connectivitycheck.gstatic.com", HTTP_GET, []() {
     if (wifiConnected) handleAndroid204(); else handleCaptivePortal();
   });
-
-  // ── Windows NCSI ─────────────────────────────────────────────
-  // Windows checks /ncsi.txt and expects "Microsoft NCSI" to confirm internet.
-  localServer.on("/ncsi.txt",         HTTP_GET, []() {
+  localServer.on("/ncsi.txt", HTTP_GET, []() {
     if (wifiConnected) handleWindowsNCsi(); else handleCaptivePortal();
   });
-  localServer.on("/connecttest.txt",  HTTP_GET, []() {
+  localServer.on("/connecttest.txt", HTTP_GET, []() {
     if (wifiConnected) handleWindowsConnectTest(); else handleCaptivePortal();
   });
-  localServer.on("/redirect",         HTTP_GET, handleCaptivePortal);
-  localServer.on("/hotspot",          HTTP_GET, handleCaptivePortal);
-
-  // Functional endpoints
+  localServer.on("/redirect", HTTP_GET, handleCaptivePortal);
+  localServer.on("/hotspot",  HTTP_GET, handleCaptivePortal);
   localServer.on("/save",        HTTP_GET, handleSave);
   localServer.on("/connectwifi", HTTP_GET, handleConnectWifi);
   localServer.on("/resetwifi",   HTTP_GET, handleResetWifi);
   localServer.on("/status",      HTTP_GET, handleStatus);
-
-  // Catch-all: any unknown URL → redirect to setup page
   localServer.onNotFound(handleCaptivePortal);
-
   localServer.begin();
   Serial.println("[LocalWeb] Captive portal aktif di http://192.168.4.1");
 }
@@ -894,7 +1243,7 @@ void setupWebServer() {
 // WIFI CONNECT
 // ================================================================
 bool tryConnectWiFi(int sec) {
-  WiFi.begin();  // Use saved credentials from NVS
+  WiFi.begin();
   Serial.print("[WiFi] Connecting");
   for (int i = 0; i < sec*2 && WiFi.status() != WL_CONNECTED; i++) {
     delay(500); Serial.print(".");
@@ -945,11 +1294,9 @@ void handleOverloadAlert() {
       overloadBlinkState  = false;
       digitalWrite(PIN_LED_RED, LOW);
       digitalWrite(PIN_BUZZER,  LOW);
-      Serial.println("[Alert] Linger selesai");
       return;
     }
   }
-
   bool active = isOverload || overloadAlertLinger;
   if (!active) {
     digitalWrite(PIN_LED_RED, LOW);
@@ -957,7 +1304,6 @@ void handleOverloadAlert() {
     overloadBlinkState = false;
     return;
   }
-
   if (millis() - lastOverloadBlinkMs >= OVERLOAD_BLINK_MS) {
     overloadBlinkState = !overloadBlinkState;
     digitalWrite(PIN_LED_RED, overloadBlinkState ? HIGH : LOW);
@@ -977,7 +1323,7 @@ void checkResetButton() {
     delay(100);
     if (millis() - t >= 3000) {
       oledStatus("Resetting WiFi...", "");
-      WiFi.disconnect(true, true);  // erase NVS WiFi credentials
+      WiFi.disconnect(true, true);
       delay(500); ESP.restart();
     }
   }
@@ -1041,12 +1387,22 @@ void oledData(float v, float i, float p, float pf, float hz, float kwh,
   if (!dev) {
     display.setCursor(15,20); display.println("No Device");
     display.setCursor(5,32);  display.println("Colokkan beban...");
+    // ③ Tampilkan nama device yang sedang ditunggu (jika ada)
+    if (strlen(sessionDeviceName) > 0) {
+      display.setCursor(0,44);
+      display.printf("Dev: %s", sessionDeviceName);
+    }
     display.display(); return;
   }
 
-  display.setCursor(0,13); display.printf("V:%.1fV  I:%.2fA", v, i);
-  display.setCursor(0,23); display.printf("P:%.1fW  PF:%.2f", p, pf);
-  display.setCursor(0,33); display.printf("Hz:%.1f Thr:%.0fW", hz, overloadThreshold);
+  // ③ Tampilkan nama device di baris atas data
+  display.setCursor(0,13);
+  char shortName[17];
+  strlcpy(shortName, sessionDeviceName, sizeof(shortName));
+  display.printf("%-16s", shortName);
+
+  display.setCursor(0,23); display.printf("V:%.1fV  I:%.2fA", v, i);
+  display.setCursor(0,33); display.printf("P:%.1fW  PF:%.2f", p, pf);
   display.drawLine(0,43,127,43,WHITE);
   display.setCursor(0,47); display.printf("E:%.4f kWh", kwh);
   display.setCursor(0,57);
@@ -1072,7 +1428,9 @@ void setup() {
 
   pzemSerial.begin(9600, SERIAL_8N1, 16, 17);
   loadPrefs();
-  loadSessionFromPrefs();
+
+  // ① Init LittleFS sebelum apapun
+  fsInit();
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
     Serial.println("[OLED] Init gagal");
@@ -1080,14 +1438,6 @@ void setup() {
 
   checkResetButton();
 
-  // ── Mode AP+STA: AP always active for config, STA for internet ──
-  // BUG 2 FIX: We NEVER call WiFiManager. Instead:
-  //   1. Start our own AP (SEM-Config) with proper captive portal handlers
-  //   2. Try to connect using saved NVS credentials via WiFi.begin()
-  //   3. If no saved credentials or connection fails → go offline mode
-  //      The SEM-Config captive portal is already running and will trigger
-  //      iOS/Android "Sign in to Network" because our handlers correctly
-  //      respond to OS probe URLs (/hotspot-detect.html, /generate_204, etc.)
   WiFi.mode(WIFI_AP_STA);
   startLocalAP();
   setupWebServer();
@@ -1095,7 +1445,6 @@ void setup() {
   oledStatus("AP: SEM-Config", "pw: 12345678");
   delay(1500);
 
-  // Try to connect with saved credentials
   oledStatus("Connecting WiFi...", "");
   wifiConnected = tryConnectWiFi(20);
 
@@ -1107,28 +1456,38 @@ void setup() {
     delay(800);
     syncThresholdFromFirebase();
     clearFirebaseCommand();
+
+    // ② Session recovery — harus setelah NTP sync agar timestamp akurat
+    doSessionRecovery();
+
+    // ④ Sync offline history yang mungkin tertinggal
+    fsSyncOfflineHistoryToFirebase();
+
     unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
     sendToFirebase(0,0,0,0,0,0,0,false,false,false,ts);
     Serial.println("[Boot] Online — relay OFF, tunggu perintah web");
   } else {
-    // No saved credentials or connection failed.
-    // Go offline — SEM-Config AP + captive portal already running.
-    // iOS/Android will show "Sign in to Network" notification because:
-    //   /hotspot-detect.html  → returns redirect (not "Success") → iOS shows popup
-    //   /generate_204         → returns redirect (not 204)       → Android shows popup
     modeOffline = true; offlineStartMs = millis();
     sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
     hadDataOnce=false; disconnectCount=0; isOverload=false;
     overloadAlertLinger=false;
+
+    // ② Session recovery juga dicoba saat offline (push akan antri ke history_offline.json)
+    doSessionRecovery();
+
+    // ③ Generate nama device untuk mode offline
+    generateOfflineDeviceName();
+    sessionStartTs = millis() / 1000;
+
     setRelay(true, "mode offline otomatis");
-    oledStatus("Mode OFFLINE", "Relay ON - Siap ukur");
+    oledStatus("Mode OFFLINE", sessionDeviceName);
     delay(1500);
     lastReconnectMs = millis();
-    Serial.println("[Boot] Offline — relay ON, AP: 192.168.4.1");
-    Serial.println("[Boot] Captive portal active — iOS/Android will show 'Sign in to Network'");
+    Serial.printf("[Boot] Offline — relay ON, device: %s\n", sessionDeviceName);
   }
 
-  lastLoopMs = lastThresholdSyncMs = lastCommandPollMs = millis();
+  lastLoopMs = lastThresholdSyncMs = lastCommandPollMs = lastCheckpointMs
+             = lastOfflineSyncRetryMs = millis();
 }
 
 // ================================================================
@@ -1145,7 +1504,7 @@ void loop() {
   handleGreenLed();
   handleOverloadAlert();
 
-  // ── WiFi disconnect detection (runtime) ────────────────────
+  // ── WiFi disconnect detection ─────────────────────────────
   if (wifiConnected && WiFi.status() != WL_CONNECTED) {
     wifiConnected = false;
     if (!modeOffline) offlineStartMs = now;
@@ -1153,15 +1512,19 @@ void loop() {
     digitalWrite(PIN_LED_BLUE, LOW);
     lastReconnectMs = now;
     Serial.println("[WiFi] Terputus");
-    if (relayOn && hadDataOnce) { saveSessionToPrefs(); Serial.println("[Session] → flash"); }
     if (!relayOn) {
-      sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
-      hadDataOnce=false; disconnectCount=0; isOverload=false; overloadAlertLinger=false;
+      // Relay sedang OFF saat WiFi putus → nyalakan relay untuk offline mode
+      // ③ Generate nama baru hanya jika tidak ada sesi aktif
+      if (strlen(sessionDeviceName) == 0)
+        generateOfflineDeviceName();
+      sessionStartTs = now / 1000;
       setRelay(true, "mode offline (WiFi putus)");
     }
+    // Simpan checkpoint terakhir sebelum masuk offline
+    if (sessionActive && hadDataOnce) fsWriteSession();
   }
 
-  // ── Auto-reconnect every 60 seconds ─────────────────────────
+  // ── Auto-reconnect setiap 60 detik ───────────────────────
   if (!wifiConnected && now - lastReconnectMs >= RECONNECT_INTERVAL) {
     lastReconnectMs = now;
     wifiConnected = tryConnectWiFi(15);
@@ -1169,29 +1532,40 @@ void loop() {
       modeOffline = false; WiFi.setSleep(false);
       if (!ntpSynced) ntpSynced = tryNTPSync();
       syncThresholdFromFirebase();
+      // ④ Sync offline history saat reconnect
+      fsSyncOfflineHistoryToFirebase();
       unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now/1000;
       sendToFirebase(lastV, lastI, lastP, lastPF, lastHz,
                      sessionKwh, sessionCost,
                      deviceConnected, isOverload, relayOn, ts);
       Serial.printf("[WiFi] Online! Offline %.0fs\n", (float)(now-offlineStartMs)/1000);
-      oledStatus("WiFi Kembali!", "Data dikirim...");
+      oledStatus("WiFi Kembali!", "Sync data...");
       delay(800);
     }
   }
 
-  // ── Sync threshold from Firebase (online) ──────────────────
+  // ── Sync threshold dari Firebase ─────────────────────────
   if (wifiConnected && now - lastThresholdSyncMs >= THRESHOLD_SYNC_INTERVAL) {
     lastThresholdSyncMs = now;
     syncThresholdFromFirebase();
   }
 
-  // ── Poll relay command from Firebase (online only) ──────────
+  // ── Poll relay command (online only) ─────────────────────
   if (wifiConnected && !modeOffline && now - lastCommandPollMs >= COMMAND_POLL_INTERVAL) {
     lastCommandPollMs = now;
     pollCommandFromFirebase();
   }
 
-  // ── Sensor loop every 5 seconds ─────────────────────────────
+  // ④ Retry sync offline history jika ada yang belum ter-sync
+  if (wifiConnected && now - lastOfflineSyncRetryMs >= OFFLINE_SYNC_RETRY_INTERVAL) {
+    lastOfflineSyncRetryMs = now;
+    if (LittleFS.exists(FS_HISTORY_PATH)) {
+      Serial.println("[Sync] Retry sync offline history...");
+      fsSyncOfflineHistoryToFirebase();
+    }
+  }
+
+  // ── Sensor loop setiap 5 detik ────────────────────────────
   if (now - lastLoopMs < LOOP_INTERVAL) return;
   float dT = (float)(now - lastLoopMs) / 3600000.0f;
   lastLoopMs = now;
@@ -1223,13 +1597,18 @@ void loop() {
     sessionCost      = sessionKwh * tarif;
   }
 
-  if (!wifiConnected && relayOn && hadDataOnce) saveSessionToPrefs();
+  // ① Checkpoint ke LittleFS setiap 30 detik
+  if (sessionActive && hadDataOnce && (now - lastCheckpointMs >= CHECKPOINT_INTERVAL)) {
+    lastCheckpointMs = now;
+    fsWriteSession();
+  }
 
   prevDevConn = deviceConnected;
 
-  Serial.printf("[%s] Relay:%s Dev:%s V:%.1f I:%.2f P:%.1f E:%.4f Ovl:%s Thr:%.0f\n",
-    modeOffline?"OFF":"ONL", relayOn?"ON":"OFF", deviceConnected?"Y":"N",
-    voltage, current, power, sessionKwh, isOverload?"YES":"no", overloadThreshold);
+  Serial.printf("[%s] Relay:%s Dev:%s(%s) V:%.1f I:%.2f P:%.1f E:%.4f Ovl:%s\n",
+    modeOffline?"OFF":"ONL", relayOn?"ON":"OFF",
+    deviceConnected?"Y":"N", sessionDeviceName,
+    voltage, current, power, sessionKwh, isOverload?"YES":"no");
 
   unsigned long offMs = modeOffline ? (now - offlineStartMs) : 0;
   oledData(voltage, current, power, pf, frequency,
