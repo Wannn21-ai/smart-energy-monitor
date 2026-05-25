@@ -73,6 +73,9 @@ const unsigned long OVERLOAD_ALERT_LINGER      = 10000;
 const unsigned long CHECKPOINT_INTERVAL        = 30000;  // ① auto-save tiap 30 detik
 const unsigned long OFFLINE_SYNC_RETRY_INTERVAL = 15000; // ④ retry sync offline history
 
+const unsigned long OFFLINE_NEXT_SESSION_HOLD   = 1000;
+const unsigned long RESET_WIFI_HOLD             = 5000;
+
 const int DISCONNECT_THRESHOLD = 2;
 
 // ① LittleFS paths
@@ -117,6 +120,7 @@ unsigned long sessionStartTs = 0;   // Unix timestamp atau millis/1000
 char  currentUid[64] = "";
 char  currentSessionId[48] = "";
 char  lastCommandId[48] = "";
+int   offlineDeviceCounter = 0;
 
 float lastV = 0, lastI = 0, lastP = 0, lastPF = 0, lastHz = 0;
 bool  hadDataOnce = false;
@@ -167,6 +171,7 @@ void syncThresholdFromFirebase(); void pollCommandFromFirebase();
 void clearFirebaseCommand();
 void handleBlueLed(); void handleGreenLed(); void handleOverloadAlert();
 void checkResetButton();
+void startOfflineSession(const char* reason);
 void oledSplash(); void oledStatus(const char* l1, const char* l2 = "");
 void oledData(float v, float i, float p, float pf, float hz, float kwh,
               float cost, bool dev, bool online, bool ovl, bool relay,
@@ -533,10 +538,7 @@ void transitionToOfflineMode() {
   
   // Jika relay belum ON, nyalakan untuk offline mode
   if (!relayOn) {
-    if (strlen(sessionDeviceName) == 0)
-      generateOfflineDeviceName();
-    sessionStartTs = now / 1000;
-    setRelay(true, "mode offline");
+    startOfflineSession("mode offline");
     Serial.printf("[Mode-Offline] Relay ON — device: %s\n", sessionDeviceName);
   } else {
     // Relay sudah ON, generate nama device baru jika belum ada
@@ -945,11 +947,36 @@ void generateOfflineDeviceName() {
     return;
   }
   
-  // Cek berapa sesi offline yang sudah ada untuk buat nama unik
+  // Cek history offline + counter runtime supaya nama naik saat multi-sesi offline.
   int count = fsCountOfflineHistory();
+  if (offlineDeviceCounter < count) offlineDeviceCounter = count;
+  offlineDeviceCounter++;
   snprintf(sessionDeviceName, sizeof(sessionDeviceName),
-           "Offline Device %d", count + 1);
+           "Device %d", offlineDeviceCounter);
   Serial.printf("[Offline] Nama device: %s\n", sessionDeviceName);
+}
+
+void startOfflineSession(const char* reason) {
+  if (!modeOffline) return;
+
+  sessionEnergyWh = 0;
+  sessionKwh = 0;
+  sessionCost = 0;
+  hadDataOnce = false;
+  deviceConnected = false;
+  prevDevConn = false;
+  disconnectCount = 0;
+  isOverload = false;
+  overloadAlertLinger = false;
+  currentSessionId[0] = '\0';
+  sessionDeviceName[0] = '\0';
+  generateOfflineDeviceName();
+
+  unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+  sessionStartTs = nowTs;
+  setRelay(true, reason);
+  Serial.printf("[Offline] New session: %s (%s)\n", sessionDeviceName, reason);
+  oledStatus("Offline session", sessionDeviceName);
 }
 
 // ================================================================
@@ -1527,15 +1554,43 @@ void handleOverloadAlert() {
 // ================================================================
 void checkResetButton() {
   if (digitalRead(PIN_RESET_WIFI) != LOW) return;
-  unsigned long t = millis();
-  oledStatus("Hold to reset", "WiFi credentials");
+  unsigned long pressStart = millis();
+  bool resetPromptShown = false;
+
+  if (modeOffline && !relayOn && !sessionActive) {
+    oledStatus("Hold 1s: New", "Hold 5s: Reset");
+  } else {
+    oledStatus("Hold 5s reset", "WiFi credentials");
+  }
+
   while (digitalRead(PIN_RESET_WIFI) == LOW) {
-    delay(100);
-    if (millis() - t >= 3000) {
+    unsigned long held = millis() - pressStart;
+    if (!resetPromptShown && held >= OFFLINE_NEXT_SESSION_HOLD) {
+      resetPromptShown = true;
+      if (modeOffline && !relayOn && !sessionActive) {
+        oledStatus("Release: New", "Hold 5s: Reset");
+      } else {
+        oledStatus("Keep holding", "Reset at 5s");
+      }
+    }
+
+    if (held >= RESET_WIFI_HOLD) {
       oledStatus("Resetting WiFi...", "");
+      if (sessionActive && hadDataOnce) fsWriteSession();
+      digitalWrite(PIN_RELAY, RELAY_OFF);
+      relayOn = false;
+      sessionActive = false;
       WiFi.disconnect(true, true);
       delay(500); ESP.restart();
     }
+    delay(50);
+  }
+
+  unsigned long held = millis() - pressStart;
+  if (held >= OFFLINE_NEXT_SESSION_HOLD &&
+      held < RESET_WIFI_HOLD &&
+      modeOffline && !relayOn && !sessionActive) {
+    startOfflineSession("offline button");
   }
 }
 
@@ -1586,8 +1641,9 @@ void oledData(float v, float i, float p, float pf, float hz, float kwh,
   if (!relay) {
     display.setCursor(10,20); display.println("Relay OFF");
     if (offline) {
-      display.setCursor(0,32); display.println("SEM-Config:12345678");
-      display.setCursor(0,44); display.println("-> 192.168.4.1");
+      display.setCursor(0,32); display.println("Hold 1s: New");
+      display.setCursor(0,44); display.println("Hold 5s: Reset");
+      display.setCursor(0,56); display.println("192.168.4.1");
     } else {
       display.setCursor(0,32); display.println("Web: klik + utk mulai");
     }
