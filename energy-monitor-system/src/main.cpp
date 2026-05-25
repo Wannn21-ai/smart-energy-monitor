@@ -114,6 +114,9 @@ bool  sessionActive     = false;
 // ③ Nama device & durasi untuk session recovery
 char  sessionDeviceName[32] = "";
 unsigned long sessionStartTs = 0;   // Unix timestamp atau millis/1000
+char  currentUid[64] = "";
+char  currentSessionId[48] = "";
+char  lastCommandId[48] = "";
 
 float lastV = 0, lastI = 0, lastP = 0, lastPF = 0, lastHz = 0;
 bool  hadDataOnce = false;
@@ -169,6 +172,8 @@ void oledData(float v, float i, float p, float pf, float hz, float kwh,
               float cost, bool dev, bool online, bool ovl, bool relay,
               bool offline, unsigned long offMs);
 String buildDuration(unsigned long startTs, unsigned long nowTs);
+unsigned long getSessionElapsedSec(unsigned long nowTs);
+String jsonEscape(const char* s);
 void generateOfflineDeviceName();
 
 // ================================================================
@@ -411,6 +416,25 @@ String buildDuration(unsigned long startTs, unsigned long endTs) {
   char buf[16];
   snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", h, m, s);
   return String(buf);
+}
+
+unsigned long getSessionElapsedSec(unsigned long nowTs) {
+  if (!sessionActive || sessionStartTs == 0 || nowTs <= sessionStartTs) return 0;
+  return nowTs - sessionStartTs;
+}
+
+String jsonEscape(const char* s) {
+  String out;
+  if (!s) return out;
+  while (*s) {
+    char c = *s++;
+    if (c == '"' || c == '\\') out += '\\';
+    if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\t') out += "\\t";
+    else out += c;
+  }
+  return out;
 }
 
 // ================================================================
@@ -698,20 +722,77 @@ void pollCommandFromFirebase() {
   int code = h.GET();
   if (code == 200) {
     String pl = h.getString(); pl.trim(); h.end();
-    if (pl == "true" && !relayOn) {
+    bool hasCommand = false;
+    bool cmdStart = false;
+    bool cmdStop = false;
+    char cmdId[48] = "";
+    char cmdUid[64] = "";
+    char cmdSessionId[48] = "";
+    char cmdDeviceName[32] = "";
+    float cmdTarif = 0.0f;
+    float cmdThreshold = 0.0f;
+
+    if (pl == "true" || pl == "false") {
+      hasCommand = true;
+      cmdStart = (pl == "true");
+      cmdStop = (pl == "false");
+    } else if (pl != "null" && pl.length() > 0) {
+      StaticJsonDocument<512> doc;
+      DeserializationError err = deserializeJson(doc, pl);
+      if (err) {
+        Serial.printf("[Command] JSON invalid: %s\n", err.c_str());
+        return;
+      }
+
+      const char* type = doc["type"] | "";
+      bool on = doc["on"] | false;
+      hasCommand = true;
+      cmdStart = (strcmp(type, "START") == 0) || on;
+      cmdStop = (strcmp(type, "STOP") == 0) || (doc.containsKey("on") && !on);
+      strlcpy(cmdId, doc["id"] | "", sizeof(cmdId));
+      strlcpy(cmdUid, doc["uid"] | "", sizeof(cmdUid));
+      strlcpy(cmdSessionId, doc["sessionId"] | "", sizeof(cmdSessionId));
+      strlcpy(cmdDeviceName, doc["deviceName"] | "", sizeof(cmdDeviceName));
+      cmdTarif = doc["tariff"] | 0.0f;
+      cmdThreshold = doc["threshold"] | 0.0f;
+    }
+
+    if (!hasCommand || (!cmdStart && !cmdStop)) return;
+
+    if (strlen(cmdId) > 0 && strcmp(cmdId, lastCommandId) == 0) {
+      Serial.printf("[Command] Duplicate ignored: %s\n", cmdId);
+      clearFirebaseCommand();
+      return;
+    }
+    if (strlen(cmdId) > 0) strlcpy(lastCommandId, cmdId, sizeof(lastCommandId));
+
+    if (cmdStart && !relayOn) {
       // Web command: turn relay ON (untuk online mode)
       sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
       hadDataOnce=false; disconnectCount=0; isOverload=false;
       overloadAlertLinger=false;
       // ③ Offline mode: nama otomatis dari web command juga pakai generate
-      if (strlen(sessionDeviceName) == 0)
-        strlcpy(sessionDeviceName, "Device", sizeof(sessionDeviceName));
+      if (strlen(cmdUid) > 0) strlcpy(currentUid, cmdUid, sizeof(currentUid));
+      if (strlen(cmdSessionId) > 0) strlcpy(currentSessionId, cmdSessionId, sizeof(currentSessionId));
+      if (strlen(cmdDeviceName) > 0) strlcpy(sessionDeviceName, cmdDeviceName, sizeof(sessionDeviceName));
+      else if (strlen(sessionDeviceName) == 0) strlcpy(sessionDeviceName, "Device", sizeof(sessionDeviceName));
+
+      bool prefsChanged = false;
+      if (cmdTarif > 0 && cmdTarif != tarif) {
+        tarif = cmdTarif;
+        prefsChanged = true;
+      }
+      if (cmdThreshold > 0 && cmdThreshold != overloadThreshold) {
+        overloadThreshold = cmdThreshold;
+        prefsChanged = true;
+      }
+      if (prefsChanged) savePrefs();
       setRelay(true, "perintah web");
       unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
       sessionStartTs = nowTs;
       clearFirebaseCommand();
       Serial.println("[Command] ✓ Relay ON (from web)");
-    } else if (pl == "false" && relayOn) {
+    } else if (cmdStop && relayOn) {
       // Web command: turn relay OFF (stop session)
       unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
       if (sessionActive && sessionKwh > 0) {
@@ -726,6 +807,7 @@ void pollCommandFromFirebase() {
       sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
       hadDataOnce=false; prevDevConn=false; disconnectCount=0;
       sessionDeviceName[0] = '\0';
+      currentSessionId[0] = '\0';
       clearFirebaseCommand();
       Serial.println("[Command] ✓ Relay OFF (from web)");
     }
@@ -763,13 +845,23 @@ bool sendToFirebase(float v, float i, float p, float pf, float hz,
   HTTPClient h;
   h.begin(c, String(FIREBASE_HOST) + FIREBASE_PATH);
   h.addHeader("Content-Type","application/json");
+  unsigned long elapsedSec = getSessionElapsedSec(ts);
+  const char* modeStr = modeOffline
+    ? (relay ? "OFFLINE_MONITORING" : "OFFLINE_IDLE")
+    : (relay ? "ONLINE_MONITORING" : "ONLINE_IDLE");
   String j = "{";
   j += "\"system\":{\"timestamp\":" + String(ts) + ",\"internet\":true";
   j += ",\"threshold\":" + String(overloadThreshold,0);
   j += ",\"tarif\":"     + String(tarif,2);
   j += ",\"relay\":"     + String(relay ? "true":"false");
   j += ",\"offline\":"   + String(modeOffline ? "true":"false");
-  j += ",\"deviceName\":\"" + String(sessionDeviceName) + "\"},";
+  j += ",\"sessionActive\":" + String(sessionActive ? "true":"false");
+  j += ",\"sessionStartTs\":" + String(sessionStartTs);
+  j += ",\"elapsedSec\":" + String(elapsedSec);
+  j += ",\"mode\":\"" + String(modeStr) + "\"";
+  j += ",\"uid\":\""; j += jsonEscape(currentUid); j += "\"";
+  j += ",\"sessionId\":\""; j += jsonEscape(currentSessionId); j += "\"";
+  j += ",\"deviceName\":\""; j += jsonEscape(sessionDeviceName); j += "\"},";
   j += "\"connected\":"  + String(dev  ? "true":"false") + ",";
   j += "\"overload\":"   + String(ovl  ? "true":"false") + ",";
   j += "\"device\":{";

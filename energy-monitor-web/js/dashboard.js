@@ -80,6 +80,7 @@ let offlineSessionStartEnergy = null;
 // Was declared inside updateMeters() (local), so btnSaveDev handler
 // could never read/write the same variable. Now shared correctly.
 let pendingDeviceName = null;
+let pendingSessionId = null;
 
 // ================= STATE — OFFLINE TRACKING =================
 let offlineDetectedAt       = null;
@@ -88,9 +89,21 @@ let reconnectToastShown     = false;
 let autoSaveTriggered       = false;
 
 // ================= RELAY COMMAND =================
-async function sendRelayCommand(on) {
+function makeId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function sendRelayCommand(type, payload = {}) {
   try {
-    await set(commandRef, on);
+    const on = type === "START";
+    const command = {
+      id: makeId("cmd"),
+      type,
+      uid,
+      createdAt: Date.now(),
+      ...payload
+    };
+    await set(commandRef, command);
     console.log(`[Relay] Command ${on ? "ON" : "OFF"} → Firebase`);
   } catch (e) {
     console.error("[Relay] Gagal:", e);
@@ -522,6 +535,7 @@ async function resetMonitoring() {
   autoSaveTriggered = false;
   offlineSessionStartEnergy = null;
   pendingDeviceName = null;
+  pendingSessionId = null;
   await saveActiveSession(null);
   voltage = current = firebasePower = 0;
   clearDisplay();
@@ -539,7 +553,7 @@ let deviceConnectTime   = null;
 let deviceConnectEnergy = 0;
 
 async function startMonitoring(name) {
-  activeDevice    = { id: `dev_${Date.now()}`, name };
+  activeDevice    = { id: pendingSessionId || makeId("sess"), name };
   startTime       = deviceConnectTime   || Date.now();
   energyBaseline  = (deviceConnectEnergy !== undefined && deviceConnectEnergy > 0)
                     ? deviceConnectEnergy
@@ -549,6 +563,7 @@ async function startMonitoring(name) {
   sessionSaved    = false;
   autoSaveTriggered = false;
   offlineSessionStartEnergy = null;
+  pendingSessionId = null;
 
   await saveActiveSession({ ...activeDevice, startTime, energyBaseline });
   if (valDeviceName)  valDeviceName.textContent  = name;
@@ -654,7 +669,13 @@ btnSaveDev.addEventListener("click", async () => {
     // pendingDeviceName is read in updateMeters when device comes online
     showToast(`Menyalakan relay untuk "${name}"...`, "");
     pendingDeviceName = name;
-    await sendRelayCommand(true);
+    pendingSessionId = makeId("sess");
+    await sendRelayCommand("START", {
+      sessionId: pendingSessionId,
+      deviceName: name,
+      tariff: settings.tariff,
+      threshold: settings.overloadThreshold
+    });
   }
 });
 
@@ -681,7 +702,10 @@ if (btnStop) {
       showToast("Tidak ada sesi yang berjalan", "error"); return;
     }
     await saveSession();
-    await sendRelayCommand(false);
+    await sendRelayCommand("STOP", {
+      sessionId: activeDevice.id,
+      reason: "USER_STOP"
+    });
     showToast("Sesi dihentikan — relay OFF ⏹", "");
     await resetMonitoring();
   });
