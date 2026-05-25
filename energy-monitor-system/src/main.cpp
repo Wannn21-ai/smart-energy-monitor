@@ -140,7 +140,7 @@ void loadPrefs(); void savePrefs();
 
 // ① LittleFS helpers
 bool   fsInit();
-void   fsWriteSession();
+bool   fsWriteSession();
 void   fsClearSession();
 bool   fsReadSession(float &outEnergyWh, float &outKwh, float &outCost,
                      char *outName, unsigned long &outStartTs);
@@ -169,6 +169,7 @@ void oledData(float v, float i, float p, float pf, float hz, float kwh,
               float cost, bool dev, bool online, bool ovl, bool relay,
               bool offline, unsigned long offMs);
 String buildDuration(unsigned long startTs, unsigned long nowTs);
+void generateOfflineDeviceName();
 
 // ================================================================
 // ① LittleFS INIT
