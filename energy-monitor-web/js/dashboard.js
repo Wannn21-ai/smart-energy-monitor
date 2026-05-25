@@ -44,13 +44,7 @@ setInterval(async () => {
 }, 10000);
 
 // ================= CONSTANTS =================
-// Berapa detik tanpa update dari ESP32 dianggap "offline"
-// ESP32 loop = 5 detik + network delay ~3 detik = ~8 detik
-// Threshold 15 detik memberikan margin yang cukup
 const STALE_THRESHOLD = 15;
-
-// Berapa detik offline sebelum sesi otomatis disimpan
-// (mencegah false positive dari gangguan sesaat)
 const AUTO_SAVE_AFTER_OFFLINE_SEC = 60;
 
 // ================= STATE — FIREBASE DATA =================
@@ -59,12 +53,12 @@ let firebasePF = 0, firebaseFreq = 0, firebaseApparent = 0;
 let firebaseEnergy = 0, firebaseCost = 0;
 let firebaseOverload = false;
 let firebaseRelay    = false;
-let firebaseOffline  = false;  // flag dari ESP32: true = ESP32 sedang offline mode
+let firebaseOffline  = false;
 let systemInternet   = false;
 
 // ================= STATE — WEB =================
-let systemOnline = false;   // true = data Firebase fresh (< STALE_THRESHOLD)
-let deviceOnline = false;   // true = ada device terbaca
+let systemOnline = false;
+let deviceOnline = false;
 let prevDeviceConnected = false;
 let prevOverload        = false;
 let prevRelayState      = false;
@@ -79,17 +73,18 @@ let metersInterval = null;
 let energyBaseline  = 0;
 let sessionCount    = 0;
 let lastknownEnergy = 0;
+let offlineSessionStartEnergy = null;
 
-// Tracking energi saat offline (untuk transfer offline→online)
-// Saat ESP32 offline: energyBaseline tetap = nilai saat relay pertama ON
-// Saat kembali online: ESP32 kirim nilai akumulasi, web langsung pakai
-let offlineSessionStartEnergy = null;  // energy saat sesi dimulai offline
+// ── BUG 1 FIX: pendingDeviceName moved to MODULE scope ──────────
+// Was declared inside updateMeters() (local), so btnSaveDev handler
+// could never read/write the same variable. Now shared correctly.
+let pendingDeviceName = null;
 
 // ================= STATE — OFFLINE TRACKING =================
 let offlineDetectedAt       = null;
 let offlineBannerShown      = false;
 let reconnectToastShown     = false;
-let autoSaveTriggered       = false;  // track apakah auto-save sudah dijalankan
+let autoSaveTriggered       = false;
 
 // ================= RELAY COMMAND =================
 async function sendRelayCommand(on) {
@@ -161,7 +156,6 @@ const overloadBanner  = document.getElementById("overload-banner");
 
 // ================================================================
 // BANNER: OFFLINE ESP32
-// Muncul saat data Firebase stale > STALE_THRESHOLD detik
 // ================================================================
 let offlineBannerEl = document.getElementById("offline-banner");
 if (!offlineBannerEl) {
@@ -235,8 +229,7 @@ function hideOfflineBanner() {
 }
 
 // ================================================================
-// BANNER: RELAY READY (tunggu user klik FAB)
-// Muncul saat relay OFF, sistem online, tidak ada sesi aktif
+// BANNER: RELAY READY
 // ================================================================
 let relayBanner = document.getElementById("relay-banner");
 if (!relayBanner) {
@@ -261,7 +254,6 @@ function setRelayBanner(show) {
 
 // ================================================================
 // BANNER: OFFLINE SESSION ACTIVE
-// Muncul saat sistem offline tapi relay ON (sedang ukur offline)
 // ================================================================
 let offlineSessionBanner = document.getElementById("offline-session-banner");
 if (!offlineSessionBanner) {
@@ -341,7 +333,6 @@ const formatCost = v  => settings.currency === "USD"
   ? `$ ${v.toFixed(2)}`
   : `Rp ${Math.round(v).toLocaleString("id-ID")}`;
 
-// Energi sesi = total energy ESP32 dikurangi baseline saat sesi dimulai
 function getSessionEnergy() {
   return Math.max(0, lastknownEnergy - energyBaseline);
 }
@@ -446,7 +437,6 @@ async function saveSession() {
   if (sessionSaved || !activeDevice) return;
   const sessEnergy = getSessionEnergy();
   const sessCost   = getSessionCost();
-  // Simpan walau energi 0 (sesi yang langsung dihentikan)
   await pushHistory({
     name:      activeDevice.name,
     duration:  getDuration(),
@@ -476,6 +466,7 @@ async function resetMonitoring() {
   lastknownEnergy = 0;
   autoSaveTriggered = false;
   offlineSessionStartEnergy = null;
+  pendingDeviceName = null;
   await saveActiveSession(null);
   voltage = current = firebasePower = 0;
   clearDisplay();
@@ -564,8 +555,6 @@ async function openModalAuto() {
 }
 
 async function openModalManual() {
-  // Mode offline: ESP32 handle relay otomatis, FAB tidak dipakai
-  // Mode online: FAB → buka modal → relay ON → tunggu device
   if (!systemOnline) {
     showToast("ESP32 tidak terhubung ke internet", "error"); return;
   }
@@ -586,7 +575,13 @@ async function openModalManual() {
   setTimeout(() => inputDevName.focus(), 100);
 }
 
-// Ganti handler btnSaveDev
+// ── BUG 1 FIX: Single btnSaveDev listener ────────────────────────
+// Original code had TWO addEventListener calls on btnSaveDev:
+//   1st: called startMonitoring(name) directly
+//   2nd: called sendRelayCommand(true) and set pendingDeviceName
+// Both fired on every click, causing a race condition (relay command
+// AND immediate startMonitoring ran simultaneously).
+// Fix: ONE handler that checks waitingForName to decide the path.
 btnSaveDev.addEventListener("click", async () => {
   const usedNames = JSON.parse(inputDevName.dataset.usedNames || "[]");
   let name = inputDevName.value.trim();
@@ -595,12 +590,16 @@ btnSaveDev.addEventListener("click", async () => {
   if (name.length > 24) { showToast("Maksimal 24 karakter", "error"); return; }
   closeModal();
 
-  // Relay ON dulu, lalu tunggu device terdeteksi sebelum startMonitoring
-  showToast(`Menyalakan relay untuk "${name}"...`, "");
-  await sendRelayCommand(true);
-
-  // Simpan nama sementara, startMonitoring dipanggil saat device terdeteksi
-  pendingDeviceName = name;
+  if (waitingForName) {
+    // Auto-open path: device already connected, start monitoring directly
+    await startMonitoring(name);
+  } else {
+    // Manual FAB path: turn relay ON first, wait for device detection
+    // pendingDeviceName is read in updateMeters when device comes online
+    showToast(`Menyalakan relay untuk "${name}"...`, "");
+    pendingDeviceName = name;
+    await sendRelayCommand(true);
+  }
 });
 
 function closeModal() {
@@ -615,24 +614,11 @@ btnCancelDev.addEventListener("click", closeModal);
 modalAdd.addEventListener("click", e => {
   if (e.target === modalAdd && !waitingForName) closeModal();
 });
-btnSaveDev.addEventListener("click", async () => {
-  const usedNames = JSON.parse(inputDevName.dataset.usedNames || "[]");
-  let name = inputDevName.value.trim();
-  if (!name) name = generateUniqueName("Device", usedNames);
-  else name = generateUniqueName(name, usedNames);
-  if (name.length > 24) { showToast("Maksimal 24 karakter", "error"); return; }
-  closeModal();
-  await startMonitoring(name);
-});
 inputDevName.addEventListener("keydown", e => {
   if (e.key === "Enter") btnSaveDev.click();
 });
 
 // ================= STOP SESSION =================
-// User klik "Stop Session":
-// 1. Simpan sesi ke history
-// 2. Kirim perintah relay OFF ke Firebase
-// 3. Reset state web
 if (btnStop) {
   btnStop.addEventListener("click", async () => {
     if (!isRunning || !activeDevice) {
@@ -656,7 +642,6 @@ onValue(ref(db, "live"), snapshot => {
   firebaseRelay     = sys.relay     === true;
   firebaseOffline   = sys.offline   === true;
 
-  // Baca data device dari nested object
   const dev = data.device || {};
   voltage          = dev.voltage   || 0;
   current          = dev.current   || 0;
@@ -668,16 +653,18 @@ onValue(ref(db, "live"), snapshot => {
   firebaseCost     = dev.cost      || 0;
   firebaseOverload = dev.overload  === true;
 
-  // Update lastknownEnergy hanya jika ada data valid
   if (current > 0.01 && firebasePower > 0.5 && firebaseEnergy > 0) {
     lastknownEnergy = firebaseEnergy;
   }
 });
 
 // ================================================================
-// MAIN LOOP — dijalankan setiap refreshInterval
+// MAIN LOOP
+// ── BUG 1 FIX: declared as async so await calls inside are valid ──
+// Original was a plain function; any await inside silently returned
+// a Promise that was never caught, breaking the entire update cycle.
 // ================================================================
-function updateMeters() {
+async function updateMeters() {
   const now  = Math.floor(Date.now() / 1000);
   const diff = now - firebaseTimestamp;
 
@@ -717,8 +704,6 @@ function updateMeters() {
   }
 
   // ── Offline session banner ──────────────────────────────
-  // Muncul saat: ESP32 offline mode (firebaseOffline=true) DAN relay ON
-  // Artinya ESP32 sedang ukur tapi tidak bisa kirim ke web
   setOfflineSessionBanner(firebaseOffline && firebaseRelay && !systemOnline);
 
   // ── Update status bar ──────────────────────────────────
@@ -735,33 +720,29 @@ function updateMeters() {
     `Tariff: ${symbol()} ${settings.tariff.toLocaleString("id-ID")}/kWh`;
 
   // ── Relay banner ────────────────────────────────────────
-  // Tampil saat: online, relay OFF, tidak ada sesi aktif
   const showRelayBanner = systemOnline && !firebaseRelay && !isRunning;
   setRelayBanner(showRelayBanner);
 
   // ── Relay baru ON (ESP32 konfirmasi) ───────────────────
   if (!prevRelayState && firebaseRelay && systemOnline) {
     setRelayBanner(false);
-    // Jika belum ada sesi aktif, tunggu device
-    // (modal akan muncul saat device terdeteksi di bawah)
   }
   prevRelayState = firebaseRelay;
 
   // ── Device baru terdeteksi ─────────────────────────────
-  // Kondisi: relay ON, ada arus, belum ada sesi
-
-  let pendingDeviceName = null;
   if (!prevDeviceConnected && deviceOnline) {
     deviceConnectTime   = Date.now();
     deviceConnectEnergy = firebaseEnergy;
     lastknownEnergy     = firebaseEnergy;
     if (!isRunning) {
       if (pendingDeviceName) {
+        // Manual FAB path: relay was turned on, name was pre-set
         const name = pendingDeviceName;
         pendingDeviceName = null;
         await startMonitoring(name);
-      }else if (!waitingForName) {
-        if (settings.notifConnect)
+      } else if (!waitingForName) {
+        // Auto-detect path: device plugged in without FAB
+        if (settings.notifDevice)
           showToast("⚡ Device terdeteksi! Berikan nama.", "success");
         openModalAuto();
       }
@@ -769,11 +750,7 @@ function updateMeters() {
   }
 
   // ── Transfer data offline → online ────────────────────
-  // Saat ESP32 kembali online setelah offline:
-  // firebaseEnergy sudah berisi nilai akumulasi offline.
-  // Kita update lastknownEnergy agar sesi terhitung benar.
   if (systemOnline && prevSystemOnline === false && isRunning && activeDevice) {
-    // Baru kembali online, update lastknownEnergy dari Firebase
     if (firebaseEnergy > 0) {
       lastknownEnergy = firebaseEnergy;
       console.log(`[Transfer] Offline→Online: E=${firebaseEnergy.toFixed(4)} kWh`);
@@ -782,8 +759,6 @@ function updateMeters() {
   }
 
   // ── Auto-save sesi saat offline > AUTO_SAVE_AFTER_OFFLINE_SEC ──
-  // Jika ESP32 tidak kembali online setelah 60 detik,
-  // simpan sesi berdasarkan data terakhir yang ada
   if (!systemOnline && isRunning && activeDevice && offlineDetectedAt && !autoSaveTriggered) {
     const offSec = (Date.now() - offlineDetectedAt) / 1000;
     if (offSec >= AUTO_SAVE_AFTER_OFFLINE_SEC) {
@@ -801,8 +776,7 @@ function updateMeters() {
 
   prevSystemOnline = systemOnline;
 
-  // ── Device dicabut (ESP32 sudah matikan relay otomatis) ─
-  // Web hanya perlu reset state dan simpan ke history
+  // ── Device dicabut ─────────────────────────────────────
   if (prevDeviceConnected && !deviceOnline && systemOnline) {
     deviceConnectTime   = null;
     deviceConnectEnergy = 0;
@@ -810,7 +784,6 @@ function updateMeters() {
       closeModal();
       showToast("Device dicabut sebelum diberi nama", "error");
     } else if (isRunning && activeDevice) {
-      // Device dicabut: relay sudah OFF di ESP32, web simpan sesi
       if (settings.notifDisconnect)
         showToast(`Device "${activeDevice.name}" dicabut — sesi disimpan`, "");
       saveSession().then(() => resetMonitoring());
@@ -828,8 +801,6 @@ function updateMeters() {
   if (!webOverload && prevOverload) {
     if (isRunning && deviceOnline) setDeviceBadge("connected");
     setOverloadBanner(false);
-    // Overload teratasi — relay sudah OFF di ESP32
-    // Sesi disimpan, user harus klik FAB untuk mulai lagi
     if (isRunning && activeDevice && !sessionSaved) {
       saveSession().then(() => {
         resetMonitoring();
@@ -865,7 +836,7 @@ function startMetersInterval() {
 }
 
 // ================================================================
-// INIT — restore sesi aktif sebelumnya jika ada
+// INIT
 // ================================================================
 const savedActive = await loadActiveSession();
 if (savedActive && savedActive.id) {

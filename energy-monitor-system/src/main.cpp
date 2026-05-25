@@ -3,7 +3,6 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
-#include <WiFiManager.h>
 #include <WebServer.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -13,25 +12,25 @@
 // ================================================================
 // PIN DEFINITIONS
 // ================================================================
-#define PIN_LED_BLUE    2    // LED Biru  — WiFi status
-#define PIN_LED_GREEN   25   // LED Hijau — device connected (V>0, I>0)
-#define PIN_LED_RED     26   // LED Merah — overload (sinkron buzzer)
-#define PIN_BUZZER      5    // Buzzer    — overload (sinkron LED merah)
-#define PIN_RELAY       27   // Relay     — kontrol stopkontak (Active LOW)
-#define PIN_RESET_WIFI  0    // Tombol BOOT — hold 3 detik reset WiFi
+#define PIN_LED_BLUE    2
+#define PIN_LED_GREEN   25
+#define PIN_LED_RED     26
+#define PIN_BUZZER      5
+#define PIN_RELAY       27
+#define PIN_RESET_WIFI  0
 
 #define RELAY_ON   LOW
 #define RELAY_OFF  HIGH
 
 // ================================================================
 // LOCAL AP & WEBSERVER
-// AP selalu aktif (WIFI_AP_STA), webserver di 192.168.4.1
+// AP always active (WIFI_AP_STA), webserver at 192.168.4.1
 // ================================================================
 DNSServer dnsServer;
 const byte DNS_PORT = 53;
 
-#define AP_SSID      "SEM-Config"
-#define AP_PASS      "12345678"
+#define AP_SSID  "SEM-Config"
+#define AP_PASS  "12345678"
 WebServer localServer(80);
 
 // ================================================================
@@ -59,7 +58,7 @@ const char* FIREBASE_PATH = "/live.json";
 Preferences prefs;
 
 // ================================================================
-// KONSTANTA
+// CONSTANTS
 // ================================================================
 const float  TARIF_DEFAULT     = 1444.70f;
 const float  THRESHOLD_DEFAULT = 2000.0f;
@@ -69,14 +68,12 @@ const unsigned long RECONNECT_INTERVAL      = 60000;
 const unsigned long THRESHOLD_SYNC_INTERVAL = 30000;
 const unsigned long COMMAND_POLL_INTERVAL   = 2000;
 const unsigned long OVERLOAD_BLINK_MS       = 200;
-// LED/Buzzer tetap blink N detik setelah relay mati karena overload
 const unsigned long OVERLOAD_ALERT_LINGER   = 10000;
 
-// Device dianggap dicabut setelah N pembacaan berturutan I<0.01 & P<0.5
 const int DISCONNECT_THRESHOLD = 2;
 
 // ================================================================
-// STATE — SISTEM
+// STATE — SYSTEM
 // ================================================================
 bool wifiConnected = false;
 bool ntpSynced     = false;
@@ -92,12 +89,11 @@ bool  prevDevConn     = false;
 bool  isOverload      = false;
 int   disconnectCount = 0;
 
-// Overload alert linger: LED+Buzzer tetap berkedip setelah relay mati
 bool          overloadAlertLinger = false;
 unsigned long overloadLingerStart = 0;
 
 // ================================================================
-// STATE — AKUMULASI ENERGI
+// STATE — ENERGY ACCUMULATION
 // ================================================================
 float overloadThreshold = THRESHOLD_DEFAULT;
 float tarif             = TARIF_DEFAULT;
@@ -106,7 +102,6 @@ float sessionKwh        = 0.0f;
 float sessionCost       = 0.0f;
 bool  sessionActive     = false;
 
-// Snapshot sensor terakhir yang valid (untuk OLED offline)
 float lastV = 0, lastI = 0, lastP = 0, lastPF = 0, lastHz = 0;
 bool  hadDataOnce = false;
 
@@ -118,7 +113,6 @@ unsigned long lastReconnectMs     = 0;
 unsigned long lastThresholdSyncMs = 0;
 unsigned long lastCommandPollMs   = 0;
 
-// LED timing
 unsigned long lastBlinkMs         = 0;
 bool          blinkState          = false;
 unsigned long lastOverloadBlinkMs = 0;
@@ -130,7 +124,7 @@ bool          overloadBlinkState  = false;
 void loadPrefs(); void savePrefs();
 void saveSessionToPrefs(); void loadSessionFromPrefs(); void clearSessionPrefs();
 bool tryConnectWiFi(int sec = 20); bool tryNTPSync();
-void startLocalAP(); void setupWebServer(); void startWiFiManager();
+void startLocalAP(); void setupWebServer();
 void setRelay(bool on, const char* reason = "");
 void handleDeviceDisconnect(); void handleOverload(float power);
 bool sendToFirebase(float v, float i, float p, float pf, float freq,
@@ -207,7 +201,7 @@ void setRelay(bool on, const char* reason) {
 }
 
 // ================================================================
-// DEVICE DISCONNECT — 2 pembacaan berturutan → relay OFF
+// DEVICE DISCONNECT
 // ================================================================
 void handleDeviceDisconnect() {
   if (!relayOn || !sessionActive) return;
@@ -229,7 +223,7 @@ void handleDeviceDisconnect() {
 }
 
 // ================================================================
-// OVERLOAD — relay OFF + alert linger
+// OVERLOAD
 // ================================================================
 void handleOverload(float power) {
   bool newOvl = deviceConnected && (power >= overloadThreshold);
@@ -342,19 +336,15 @@ void startLocalAP() {
 }
 
 // ================================================================
-// LOCAL WEBSERVER — HTML
-// Hanya form konfigurasi: WiFi, threshold, tarif + reset
-// Tidak ada status sensor, tidak ada autentikasi
+// LOCAL WEBSERVER
 // ================================================================
 void handleRoot() {
-  // Scan WiFi networks untuk dropdown
   int n = WiFi.scanNetworks();
   String ssidOptions = "";
   for (int i = 0; i < n; i++) {
     String ssid = WiFi.SSID(i);
     int rssi    = WiFi.RSSI(i);
     bool locked = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-    // Signal bar: 4=kuat, 1=lemah
     int bars = rssi > -50 ? 4 : rssi > -65 ? 3 : rssi > -75 ? 2 : 1;
     String bar = bars == 4 ? "████" : bars == 3 ? "███░" : bars == 2 ? "██░░" : "█░░░";
     ssidOptions += "<option value='" + ssid + "'>"
@@ -367,13 +357,11 @@ void handleRoot() {
     "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'/>"
     "<title>Smart Energy Monitor · Setup</title>"
     "<style>"
-    // ── Reset ──
     "*{margin:0;padding:0;box-sizing:border-box}"
     "body{background:#0a0a0a;color:#f0f0f0;"
       "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
       "min-height:100vh;display:flex;flex-direction:column;"
       "align-items:center;justify-content:flex-start;padding:24px 16px}"
-    // ── Header ──
     ".hdr{width:100%;max-width:420px;display:flex;align-items:center;gap:14px;"
       "margin-bottom:28px}"
     ".hdr-icon{width:44px;height:44px;flex-shrink:0;"
@@ -382,7 +370,6 @@ void handleRoot() {
       "justify-content:center;font-size:22px}"
     ".hdr-title{font-size:17px;font-weight:700;color:#00e5ff;letter-spacing:.04em}"
     ".hdr-sub{font-size:12px;color:#444;margin-top:3px}"
-    // ── Step indicator ──
     ".steps{width:100%;max-width:420px;display:flex;"
       "align-items:center;margin-bottom:28px;gap:0}"
     ".step{display:flex;flex-direction:column;align-items:center;flex:1}"
@@ -396,7 +383,6 @@ void handleRoot() {
     ".step-label{font-size:9px;color:#444;margin-top:4px;"
       "text-transform:uppercase;letter-spacing:.06em;text-align:center}"
     ".step-line{flex:1;height:1px;background:#1a1a1a;margin-top:-14px}"
-    // ── Card ──
     ".card{background:#111;border:1px solid rgba(255,255,255,0.07);"
       "border-radius:18px;padding:22px;width:100%;max-width:420px;"
       "margin-bottom:14px}"
@@ -405,7 +391,6 @@ void handleRoot() {
       "margin-bottom:18px;padding-bottom:12px;"
       "border-bottom:1px solid rgba(255,255,255,0.04);"
       "display:flex;align-items:center;gap:8px}"
-    // ── Form ──
     ".fg{margin-bottom:18px}"
     ".fg:last-of-type{margin-bottom:0}"
     "label{display:block;font-size:11px;font-weight:600;color:#666;"
@@ -421,14 +406,11 @@ void handleRoot() {
       "border-color:#00e5ff;box-shadow:0 0 0 3px rgba(0,229,255,0.08)}"
     "select option{background:#1a1a1a;color:#f0f0f0}"
     "input::placeholder{color:#2a2a2a}"
-    // ── Input row (value + unit) ──
     ".input-row{display:flex;gap:10px;align-items:flex-end}"
     ".input-row input{flex:1}"
     ".input-unit{font-size:13px;color:#555;padding-bottom:14px;white-space:nowrap}"
-    // ── Converted preview ──
     ".converted{font-size:12px;color:#555;margin-top:6px;min-height:18px;transition:color .2s}"
     ".converted.active{color:#00e5ff}"
-    // ── Buttons ──
     ".btn{display:block;width:100%;padding:14px;"
       "border:none;border-radius:12px;"
       "font-size:15px;font-weight:700;cursor:pointer;"
@@ -438,14 +420,6 @@ void handleRoot() {
     ".btn-ghost{background:transparent;color:#555;"
       "border:1px solid rgba(255,255,255,0.08);margin-top:10px}"
     ".btn:disabled{opacity:.4;cursor:not-allowed}"
-    // ── Status badge ──
-    ".badge{display:inline-flex;align-items:center;gap:6px;"
-      "padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600}"
-    ".badge-online{background:rgba(0,230,118,0.12);"
-      "border:1px solid rgba(0,230,118,0.3);color:#00e676}"
-    ".badge-offline{background:rgba(255,171,0,0.10);"
-      "border:1px solid rgba(255,171,0,0.3);color:#ffab00}"
-    // ── Toast ──
     "#toast{position:fixed;bottom:24px;left:50%;"
       "transform:translateX(-50%) translateY(80px);opacity:0;"
       "background:#1a1a1a;border:1px solid rgba(255,255,255,0.1);"
@@ -456,15 +430,12 @@ void handleRoot() {
     "#toast.ok{border-color:rgba(0,230,118,.4);color:#00e676}"
     "#toast.err{border-color:rgba(255,23,68,.4);color:#ff1744}"
     "#toast.info{border-color:rgba(0,229,255,.4);color:#00e5ff}"
-    // ── Spinner ──
     ".spin{display:inline-block;width:16px;height:16px;"
       "border:2px solid rgba(0,0,0,.2);border-top-color:#000;"
       "border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle}"
     "@keyframes spin{to{transform:rotate(360deg)}}"
-    // ── Footer ──
     ".footer{width:100%;max-width:420px;text-align:center;"
       "font-size:11px;color:#2a2a2a;margin-top:16px;line-height:2}"
-    // ── Current values chip ──
     ".chip{display:inline-flex;align-items:center;gap:6px;"
       "background:#1a1a1a;border:1px solid rgba(255,255,255,0.06);"
       "border-radius:20px;padding:4px 12px;font-size:11px;color:#555;"
@@ -472,7 +443,6 @@ void handleRoot() {
     ".chip span{color:#00e5ff}"
     "</style></head><body>";
 
-  // ── Header ─────────────────────────────────────────────────
   html += "<div class='hdr'>"
     "<div class='hdr-icon'>⚡</div>"
     "<div>"
@@ -481,7 +451,6 @@ void handleRoot() {
     "</div>"
     "</div>";
 
-  // ── Step indicator ─────────────────────────────────────────
   html += "<div class='steps'>"
     "<div class='step'>"
       "<div class='step-dot active'>1</div>"
@@ -499,7 +468,6 @@ void handleRoot() {
     "</div>"
     "</div>";
 
-  // ── Card 1: WiFi ───────────────────────────────────────────
   html += "<div class='card' id='card-wifi'>"
     "<div class='card-title'>📶 &nbsp;Koneksi WiFi</div>"
     "<div class='fg'>"
@@ -522,7 +490,6 @@ void handleRoot() {
     "<button class='btn btn-primary' id='btn-wifi' onclick='step1()'>Hubungkan &rarr;</button>"
     "</div>";
 
-  // ── Card 2: Pengaturan (hidden until WiFi OK) ──────────────
   html += "<div class='card' id='card-settings' style='display:none'>"
     "<div class='card-title'>⚙ &nbsp;Pengaturan Energi</div>"
     "<div class='fg'>"
@@ -553,7 +520,6 @@ void handleRoot() {
     "</button>"
     "</div>";
 
-  // ── Card 3: Done (hidden) ──────────────────────────────────
   html += "<div class='card' id='card-done' style='display:none;text-align:center'>"
     "<div style='font-size:48px;margin-bottom:16px'>✅</div>"
     "<div style='font-size:16px;font-weight:700;color:#00e676;margin-bottom:8px'>"
@@ -571,20 +537,15 @@ void handleRoot() {
       "Reset &amp; Ulangi</button>"
     "</div>";
 
-  // ── Footer ─────────────────────────────────────────────────
   html += "<div class='footer'>"
     "SEM-Config &nbsp;·&nbsp; 192.168.4.1<br>"
     "Hubungkan ke WiFi <b>SEM-Config</b> &nbsp;·&nbsp; pw: <b>12345678</b>"
     "</div>";
 
-  // ── Toast ──────────────────────────────────────────────────
   html += "<div id='toast'></div>";
 
-  // ── JavaScript ─────────────────────────────────────────────
   html += R"JS(<script>
 var _tt, wifiOk = false;
-
-// ── Toast ──
 function toast(msg, type) {
   var el = document.getElementById('toast');
   el.textContent = msg;
@@ -593,8 +554,6 @@ function toast(msg, type) {
   clearTimeout(_tt);
   _tt = setTimeout(function() { el.classList.remove('show'); }, 4000);
 }
-
-// ── Converted preview (IDR → USD) ──
 var USD_RATE = 16500;
 document.getElementById('trf').addEventListener('input', function() {
   var v = parseFloat(this.value);
@@ -607,16 +566,12 @@ document.getElementById('trf').addEventListener('input', function() {
     el.className = 'converted';
   }
 });
-
-// ── Manual SSID toggle ──
 function manualSSID() {
   var w = document.getElementById('manual-wrap');
   w.style.display = w.style.display === 'none' ? 'block' : 'none';
   if (w.style.display !== 'none')
     document.getElementById('ssid-manual').focus();
 }
-
-// ── Step 1: Connect WiFi ──
 function step1() {
   var ssidSel = document.getElementById('ssid').value;
   var ssidMan = document.getElementById('ssid-manual').value.trim();
@@ -624,17 +579,13 @@ function step1() {
     ? ssidMan : ssidSel;
   var pass = document.getElementById('wpass').value;
   if (!ssid) { toast('Pilih atau ketik nama WiFi terlebih dahulu', 'err'); return; }
-
   var btn = document.getElementById('btn-wifi');
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span>  Menghubungkan...';
   toast('Mencoba terhubung ke "' + ssid + '"...', 'info');
-
-  // Step dots
   document.querySelectorAll('.step-dot')[0].className = 'step-dot done';
   document.querySelectorAll('.step-dot')[0].textContent = '✓';
   document.querySelectorAll('.step-dot')[1].className = 'step-dot active';
-
   fetch('/connectwifi?ssid=' + encodeURIComponent(ssid) + '&pass=' + encodeURIComponent(pass))
     .then(function(r) { return r.text(); })
     .then(function(t) {
@@ -665,8 +616,6 @@ function step1() {
       document.querySelectorAll('.step-dot')[1].className = 'step-dot pending';
     });
 }
-
-// ── Step 2: Save settings ──
 function step2() {
   var thr = parseFloat(document.getElementById('thr').value);
   var trf = parseFloat(document.getElementById('trf').value);
@@ -679,7 +628,6 @@ function step2() {
   var btn = document.getElementById('btn-save');
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span>  Menyimpan...';
-
   fetch('/save?thr=' + thr + '&trf=' + trf)
     .then(function(r) { return r.text(); })
     .then(function(t) {
@@ -697,12 +645,7 @@ function step2() {
       btn.innerHTML = 'Simpan & Selesai ✓';
     });
 }
-
-function skipSettings() {
-  showDone();
-}
-
-// ── Show done card ──
+function skipSettings() { showDone(); }
 function showDone() {
   document.getElementById('card-settings').style.display = 'none';
   document.getElementById('card-done').style.display = 'block';
@@ -711,7 +654,6 @@ function showDone() {
   document.querySelectorAll('.step-dot')[2].className = 'step-dot done';
   document.querySelectorAll('.step-dot')[2].textContent = '✓';
   document.getElementById('card-done').scrollIntoView({ behavior: 'smooth' });
-  // Poll IP
   setTimeout(function() {
     fetch('/status').then(function(r) { return r.json(); })
       .then(function(d) {
@@ -724,16 +666,12 @@ function showDone() {
       });
   }, 1500);
 }
-
-// ── Reset WiFi ──
 function resetWifi() {
   if (!confirm('Reset semua konfigurasi WiFi dan mulai ulang?')) return;
   fetch('/resetwifi').then(function() {
     toast('Mereset... ESP32 akan restart', 'info');
   });
 }
-
-// ── Enter key support ──
 document.addEventListener('keydown', function(e) {
   if (e.key !== 'Enter') return;
   if (!wifiOk) step1(); else step2();
@@ -744,7 +682,6 @@ document.addEventListener('keydown', function(e) {
   localServer.send(200, "text/html; charset=utf-8", html);
 }
 
-// Handler: simpan threshold & tarif
 void handleSave() {
   bool ok = false;
   if (localServer.hasArg("thr")) {
@@ -757,7 +694,6 @@ void handleSave() {
   }
   if (ok) {
     savePrefs();
-    // Jika online, push threshold ke Firebase supaya web sync
     if (wifiConnected) {
       WiFiClientSecure c; c.setInsecure(); c.setTimeout(5000);
       HTTPClient h;
@@ -776,8 +712,6 @@ void handleSave() {
   }
 }
 
-// Handler: connect ke WiFi baru
-// ESP32 coba connect ke SSID yang diberikan selama 10 detik
 void handleConnectWifi() {
   if (!localServer.hasArg("ssid")) {
     localServer.send(400, "text/plain", "SSID diperlukan");
@@ -787,15 +721,12 @@ void handleConnectWifi() {
   String pass = localServer.hasArg("pass") ? localServer.arg("pass") : "";
 
   Serial.printf("[LocalWeb] Coba connect WiFi: %s\n", ssid.c_str());
-
-  // Simpan kredensial ke flash WiFi
   WiFi.begin(ssid.c_str(), pass.c_str());
 
-  // Tunggu 10 detik
   int waited = 0;
   while (WiFi.status() != WL_CONNECTED && waited < 20) {
     delay(500); waited++;
-    localServer.handleClient(); // agar webserver tidak timeout
+    localServer.handleClient();
   }
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -804,7 +735,6 @@ void handleConnectWifi() {
     digitalWrite(PIN_LED_BLUE, HIGH);
     String ip = WiFi.localIP().toString();
     Serial.println("[LocalWeb] WiFi OK: " + ip);
-    // Kirim status awal ke Firebase
     if (!ntpSynced) ntpSynced = tryNTPSync();
     syncThresholdFromFirebase();
     clearFirebaseCommand();
@@ -817,19 +747,15 @@ void handleConnectWifi() {
   }
 }
 
-// Handler: reset WiFi & restart
 void handleResetWifi() {
   localServer.send(200, "text/plain", "Mereset konfigurasi WiFi — ESP32 restart...");
   delay(500);
-  WiFiManager wm; wm.resetSettings();
+  // Clear saved WiFi credentials from NVS, then restart
+  WiFi.disconnect(true, true);  // disconnect + erase NVS credentials
+  delay(500);
   ESP.restart();
 }
 
-void handleNotFound() {
-  localServer.send(404, "text/plain", "404 Not Found");
-}
-
-// Handler: status JSON (untuk halaman done)
 void handleStatus() {
   String ip = wifiConnected ? WiFi.localIP().toString() : "—";
   String json = "{\"wifi\":" + String(wifiConnected ? "true":"false") +
@@ -839,46 +765,125 @@ void handleStatus() {
   localServer.send(200, "application/json", json);
 }
 
-// Handler captive portal — redirect semua URL asing ke root
-// Browser (Android/iOS/Windows) mendeteksi redirect ini sebagai captive portal
-void handleCaptivePortal() {
-  localServer.sendHeader("Location", "http://192.168.4.1/", true);
-  localServer.send(302, "text/plain", "");
-}
+// ================================================================
+// BUG 2 FIX: Captive Portal Response Handlers
+//
+// Root cause: The original code called WiFiManager::startConfigPortal()
+// on first boot. WiFiManager:
+//   1. Switches WiFi mode to AP-only, killing our SEM-Config AP and
+//      all its handlers (/hotspot-detect.html, /generate_204, etc.)
+//   2. Serves its own portal that does NOT correctly respond to OS
+//      captive portal detection probes:
+//        - iOS expects 200 "Success" from /hotspot-detect.html
+//        - Android expects HTTP 204 from /generate_204
+//        - Windows expects "Microsoft NCSI" body from /ncsi.txt
+//      WiFiManager returns full HTML for all of these → OS concludes
+//      "internet works" → no "Sign in to Network" popup appears.
+//
+// Fix: Remove WiFiManager entirely. Our own SEM-Config AP (always
+// running) already has all these handlers registered in setupWebServer().
+// On first boot with no saved credentials, tryConnectWiFi() fails fast,
+// we enter offline mode, and the SEM-Config captive portal is already
+// live and working. The user opens it from the "Sign in to Network"
+// notification that iOS/Android now correctly shows.
+//
+// The handlers below are the key to making captive portal detection work:
+// ================================================================
 
-// Handler: Apple CNA (Captive Network Assistant)
+// iOS/macOS Captive Network Assistant — must return exactly this body
 void handleAppleCNA() {
-  // iOS/macOS mengecek URL ini — jika bukan "Success" maka buka portal
   localServer.send(200, "text/html",
     "<HTML><HEAD><TITLE>Success</TITLE></HEAD>"
     "<BODY>Success</BODY></HTML>");
 }
 
+// Android — must return HTTP 204 No Content (not a redirect, not HTML)
+void handleAndroid204() {
+  localServer.send(204, "text/plain", "");
+}
+
+// Windows NCSI — must return exactly "Microsoft NCSI"
+void handleWindowsNCsi() {
+  localServer.send(200, "text/plain", "Microsoft NCSI");
+}
+
+// Windows connecttest.txt — must return exactly "Microsoft Connect Test"
+void handleWindowsConnectTest() {
+  localServer.send(200, "text/plain", "Microsoft Connect Test");
+}
+
+// Catch-all: redirect everything else to our setup page
+// This is what makes the browser open automatically on iOS after
+// the "Sign in to Network" banner is tapped
+void handleCaptivePortal() {
+  localServer.sendHeader("Location", "http://192.168.4.1/", true);
+  localServer.send(302, "text/plain", "");
+}
+
 void setupWebServer() {
-  // Halaman utama
+  // Main setup page
   localServer.on("/",                HTTP_GET, handleRoot);
   localServer.on("/index.html",      HTTP_GET, handleRoot);
 
-  // Apple Captive Network Assistant endpoints
-  localServer.on("/hotspot-detect.html",   HTTP_GET, handleAppleCNA);
-  localServer.on("/library/test/success.html", HTTP_GET, handleAppleCNA);
-  localServer.on("/success.txt",           HTTP_GET, handleAppleCNA);
+  // ── iOS/macOS Captive Network Assistant ──────────────────────
+  // iOS sends GET /hotspot-detect.html; expects 200 with "Success" body.
+  // If it gets that, it knows internet is available and won't show popup.
+  // We return "Success" only AFTER WiFi is configured (wifiConnected=true).
+  // While we're in setup mode (wifiConnected=false), we return a redirect
+  // so iOS keeps showing the "Sign in to Network" banner.
+  localServer.on("/hotspot-detect.html", HTTP_GET, []() {
+    if (wifiConnected) {
+      handleAppleCNA();
+    } else {
+      // Return redirect → iOS shows captive portal notification
+      handleCaptivePortal();
+    }
+  });
+  // macOS also checks this path
+  localServer.on("/library/test/success.html", HTTP_GET, []() {
+    if (wifiConnected) handleAppleCNA(); else handleCaptivePortal();
+  });
+  // iOS 14+ also checks this
+  localServer.on("/success.txt", HTTP_GET, []() {
+    if (wifiConnected) {
+      localServer.send(200, "text/plain", "success");
+    } else {
+      handleCaptivePortal();
+    }
+  });
 
-  // Android / Windows captive portal check endpoints
-  localServer.on("/generate_204",     HTTP_GET, handleCaptivePortal);
-  localServer.on("/gen_204",          HTTP_GET, handleCaptivePortal);
+  // ── Android Captive Portal Detection ─────────────────────────
+  // Android sends GET /generate_204 and expects HTTP 204 for "no portal".
+  // While in setup mode we return 302 redirect → Android shows notification.
+  localServer.on("/generate_204", HTTP_GET, []() {
+    if (wifiConnected) handleAndroid204(); else handleCaptivePortal();
+  });
+  localServer.on("/gen_204", HTTP_GET, []() {
+    if (wifiConnected) handleAndroid204(); else handleCaptivePortal();
+  });
+  // Newer Android versions
+  localServer.on("/connectivitycheck.gstatic.com", HTTP_GET, []() {
+    if (wifiConnected) handleAndroid204(); else handleCaptivePortal();
+  });
+
+  // ── Windows NCSI ─────────────────────────────────────────────
+  // Windows checks /ncsi.txt and expects "Microsoft NCSI" to confirm internet.
+  localServer.on("/ncsi.txt",         HTTP_GET, []() {
+    if (wifiConnected) handleWindowsNCsi(); else handleCaptivePortal();
+  });
+  localServer.on("/connecttest.txt",  HTTP_GET, []() {
+    if (wifiConnected) handleWindowsConnectTest(); else handleCaptivePortal();
+  });
   localServer.on("/redirect",         HTTP_GET, handleCaptivePortal);
   localServer.on("/hotspot",          HTTP_GET, handleCaptivePortal);
-  localServer.on("/ncsi.txt",         HTTP_GET, handleCaptivePortal);
-  localServer.on("/connecttest.txt",  HTTP_GET, handleCaptivePortal);
 
-  // Fungsional
+  // Functional endpoints
   localServer.on("/save",        HTTP_GET, handleSave);
   localServer.on("/connectwifi", HTTP_GET, handleConnectWifi);
   localServer.on("/resetwifi",   HTTP_GET, handleResetWifi);
   localServer.on("/status",      HTTP_GET, handleStatus);
 
-  // Catch-all: redirect semua URL yang tidak dikenal ke root (captive portal)
+  // Catch-all: any unknown URL → redirect to setup page
   localServer.onNotFound(handleCaptivePortal);
 
   localServer.begin();
@@ -886,65 +891,10 @@ void setupWebServer() {
 }
 
 // ================================================================
-// WIFI MANAGER (portal setup awal)
-// ================================================================
-const char WIFI_MGR_HEAD[] PROGMEM = R"html(
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0a;color:#f0f0f0;font-family:sans-serif;
-     min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-.card{background:#111;border:1px solid rgba(255,255,255,0.07);
-      border-radius:18px;padding:32px;width:100%;max-width:380px}
-h1{font-size:16px;font-weight:700;margin-bottom:6px}
-p{font-size:13px;color:#666;margin-bottom:24px}
-label{display:block;font-size:11px;font-weight:600;color:#888;
-      letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px}
-input[type=text],input[type=password]{width:100%;padding:10px 14px;background:#1a1a1a;
-  border:1px solid rgba(255,255,255,0.07);border-radius:6px;
-  color:#f0f0f0;font-size:14px;outline:none;margin-bottom:16px}
-input[type=submit]{width:100%;padding:11px;background:#00e5ff;color:#000;
-  font-weight:700;font-size:14px;border:none;border-radius:6px;cursor:pointer}
-</style>
-)html";
-
-const char WIFI_MGR_BODY[] PROGMEM = R"html(
-<div class="card">
-<h1>Smart Energy Monitor</h1>
-<p>Pilih WiFi dan masukkan password untuk menghubungkan perangkat.</p>
-)html";
-
-void startWiFiManager() {
-  oledStatus("WiFi Setup", "AP: SEM-Setup");
-  WiFiManager wm;
-  wm.setCustomHeadElement(WIFI_MGR_HEAD);
-  wm.setCustomMenuHTML(WIFI_MGR_BODY);
-  WiFiManagerParameter p_thr("thr", "Overload Threshold (Watt)",
-    String(overloadThreshold,0).c_str(), 8);
-  WiFiManagerParameter p_trf("trf", "Tariff per kWh (IDR)",
-    String(tarif,2).c_str(), 10);
-  wm.addParameter(&p_thr);
-  wm.addParameter(&p_trf);
-  wm.setConfigPortalTimeout(180);
-  wm.setTitle("Smart Energy Monitor");
-  wm.setDarkMode(true);
-  bool ok = wm.startConfigPortal("SEM-Setup");
-  if (ok) {
-    float t1 = String(p_thr.getValue()).toFloat();
-    float t2 = String(p_trf.getValue()).toFloat();
-    if (t1 > 0) overloadThreshold = t1;
-    if (t2 > 0) tarif = t2;
-    savePrefs();
-    wifiConnected = true; modeOffline = false;
-  } else {
-    wifiConnected = false; modeOffline = true;
-  }
-}
-
-// ================================================================
 // WIFI CONNECT
 // ================================================================
 bool tryConnectWiFi(int sec) {
-  WiFi.begin();
+  WiFi.begin();  // Use saved credentials from NVS
   Serial.print("[WiFi] Connecting");
   for (int i = 0; i < sec*2 && WiFi.status() != WL_CONNECTED; i++) {
     delay(500); Serial.print(".");
@@ -985,15 +935,10 @@ void handleBlueLed() {
 }
 
 void handleGreenLed() {
-  // Nyala saat V>0 dan I>0 (device terhubung), mati jika tidak ada
   digitalWrite(PIN_LED_GREEN, (sessionActive && relayOn) ? HIGH : LOW);
 }
 
-// LED Merah + Buzzer sinkron:
-// - Aktif saat isOverload = true
-// - Tetap aktif OVERLOAD_ALERT_LINGER ms setelah overload selesai (linger)
 void handleOverloadAlert() {
-  // Cek apakah linger sudah habis
   if (overloadAlertLinger && !isOverload) {
     if (millis() - overloadLingerStart >= OVERLOAD_ALERT_LINGER) {
       overloadAlertLinger = false;
@@ -1013,7 +958,6 @@ void handleOverloadAlert() {
     return;
   }
 
-  // Blink sinkron 200ms
   if (millis() - lastOverloadBlinkMs >= OVERLOAD_BLINK_MS) {
     overloadBlinkState = !overloadBlinkState;
     digitalWrite(PIN_LED_RED, overloadBlinkState ? HIGH : LOW);
@@ -1033,7 +977,7 @@ void checkResetButton() {
     delay(100);
     if (millis() - t >= 3000) {
       oledStatus("Resetting WiFi...", "");
-      WiFiManager wm; wm.resetSettings();
+      WiFi.disconnect(true, true);  // erase NVS WiFi credentials
       delay(500); ESP.restart();
     }
   }
@@ -1063,7 +1007,6 @@ void oledData(float v, float i, float p, float pf, float hz, float kwh,
               bool offline, unsigned long offMs) {
   display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
 
-  // Baris 0: status
   display.setCursor(0,0);
   if (offline) {
     unsigned long s = offMs/1000;
@@ -1076,7 +1019,6 @@ void oledData(float v, float i, float p, float pf, float hz, float kwh,
   display.print(relay ? "[RLY:ON]" : "[RLY:OFF]");
   display.drawLine(0,9,127,9,WHITE);
 
-  // Overload/linger
   if (ovl || overloadAlertLinger) {
     display.setCursor(0,13); display.println("!! OVERLOAD !!");
     display.setCursor(0,23); display.printf("%.1fW >= %.0fW", lastP, overloadThreshold);
@@ -1085,7 +1027,6 @@ void oledData(float v, float i, float p, float pf, float hz, float kwh,
     display.display(); return;
   }
 
-  // Relay OFF
   if (!relay) {
     display.setCursor(10,20); display.println("Relay OFF");
     if (offline) {
@@ -1097,14 +1038,12 @@ void oledData(float v, float i, float p, float pf, float hz, float kwh,
     display.display(); return;
   }
 
-  // No device
   if (!dev) {
     display.setCursor(15,20); display.println("No Device");
     display.setCursor(5,32);  display.println("Colokkan beban...");
     display.display(); return;
   }
 
-  // Data sensor
   display.setCursor(0,13); display.printf("V:%.1fV  I:%.2fA", v, i);
   display.setCursor(0,23); display.printf("P:%.1fW  PF:%.2f", p, pf);
   display.setCursor(0,33); display.printf("Hz:%.1f Thr:%.0fW", hz, overloadThreshold);
@@ -1141,26 +1080,24 @@ void setup() {
 
   checkResetButton();
 
-  // ── Mode AP+STA: AP selalu aktif, STA untuk internet ──────
+  // ── Mode AP+STA: AP always active for config, STA for internet ──
+  // BUG 2 FIX: We NEVER call WiFiManager. Instead:
+  //   1. Start our own AP (SEM-Config) with proper captive portal handlers
+  //   2. Try to connect using saved NVS credentials via WiFi.begin()
+  //   3. If no saved credentials or connection fails → go offline mode
+  //      The SEM-Config captive portal is already running and will trigger
+  //      iOS/Android "Sign in to Network" because our handlers correctly
+  //      respond to OS probe URLs (/hotspot-detect.html, /generate_204, etc.)
   WiFi.mode(WIFI_AP_STA);
   startLocalAP();
   setupWebServer();
 
-  // Tampilkan info AP sebentar di OLED
   oledStatus("AP: SEM-Config", "pw: 12345678");
   delay(1500);
 
-  // Coba connect WiFi STA
+  // Try to connect with saved credentials
   oledStatus("Connecting WiFi...", "");
   wifiConnected = tryConnectWiFi(20);
-
-  if (!wifiConnected) {
-    // Tidak ada kredensial tersimpan → buka portal WiFiManager
-    // (sementara AP SEM-Config digantikan oleh portal "SEM-Setup")
-    startWiFiManager();
-    // Setelah portal selesai, restart AP SEM-Config kembali
-    startLocalAP();
-  }
 
   if (wifiConnected) {
     modeOffline = false;
@@ -1174,6 +1111,11 @@ void setup() {
     sendToFirebase(0,0,0,0,0,0,0,false,false,false,ts);
     Serial.println("[Boot] Online — relay OFF, tunggu perintah web");
   } else {
+    // No saved credentials or connection failed.
+    // Go offline — SEM-Config AP + captive portal already running.
+    // iOS/Android will show "Sign in to Network" notification because:
+    //   /hotspot-detect.html  → returns redirect (not "Success") → iOS shows popup
+    //   /generate_204         → returns redirect (not 204)       → Android shows popup
     modeOffline = true; offlineStartMs = millis();
     sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
     hadDataOnce=false; disconnectCount=0; isOverload=false;
@@ -1183,6 +1125,7 @@ void setup() {
     delay(1500);
     lastReconnectMs = millis();
     Serial.println("[Boot] Offline — relay ON, AP: 192.168.4.1");
+    Serial.println("[Boot] Captive portal active — iOS/Android will show 'Sign in to Network'");
   }
 
   lastLoopMs = lastThresholdSyncMs = lastCommandPollMs = millis();
@@ -1194,7 +1137,6 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // ── Webserver handle client ────────────────────────────────
   localServer.handleClient();
   dnsServer.processNextRequest();
 
@@ -1203,7 +1145,7 @@ void loop() {
   handleGreenLed();
   handleOverloadAlert();
 
-  // ── Deteksi WiFi putus (runtime) ──────────────────────────
+  // ── WiFi disconnect detection (runtime) ────────────────────
   if (wifiConnected && WiFi.status() != WL_CONNECTED) {
     wifiConnected = false;
     if (!modeOffline) offlineStartMs = now;
@@ -1219,7 +1161,7 @@ void loop() {
     }
   }
 
-  // ── Reconnect otomatis setiap 60 detik ────────────────────
+  // ── Auto-reconnect every 60 seconds ─────────────────────────
   if (!wifiConnected && now - lastReconnectMs >= RECONNECT_INTERVAL) {
     lastReconnectMs = now;
     wifiConnected = tryConnectWiFi(15);
@@ -1237,19 +1179,19 @@ void loop() {
     }
   }
 
-  // ── Sync threshold dari Firebase (online) ─────────────────
+  // ── Sync threshold from Firebase (online) ──────────────────
   if (wifiConnected && now - lastThresholdSyncMs >= THRESHOLD_SYNC_INTERVAL) {
     lastThresholdSyncMs = now;
     syncThresholdFromFirebase();
   }
 
-  // ── Poll command relay dari Firebase (online saja) ─────────
+  // ── Poll relay command from Firebase (online only) ──────────
   if (wifiConnected && !modeOffline && now - lastCommandPollMs >= COMMAND_POLL_INTERVAL) {
     lastCommandPollMs = now;
     pollCommandFromFirebase();
   }
 
-  // ── Sensor loop setiap 5 detik ────────────────────────────
+  // ── Sensor loop every 5 seconds ─────────────────────────────
   if (now - lastLoopMs < LOOP_INTERVAL) return;
   float dT = (float)(now - lastLoopMs) / 3600000.0f;
   lastLoopMs = now;
@@ -1281,24 +1223,20 @@ void loop() {
     sessionCost      = sessionKwh * tarif;
   }
 
-  // Simpan ke flash saat offline
   if (!wifiConnected && relayOn && hadDataOnce) saveSessionToPrefs();
 
   prevDevConn = deviceConnected;
 
-  // Serial debug
   Serial.printf("[%s] Relay:%s Dev:%s V:%.1f I:%.2f P:%.1f E:%.4f Ovl:%s Thr:%.0f\n",
     modeOffline?"OFF":"ONL", relayOn?"ON":"OFF", deviceConnected?"Y":"N",
     voltage, current, power, sessionKwh, isOverload?"YES":"no", overloadThreshold);
 
-  // OLED
   unsigned long offMs = modeOffline ? (now - offlineStartMs) : 0;
   oledData(voltage, current, power, pf, frequency,
            sessionKwh, sessionCost,
            deviceConnected, wifiConnected,
            isOverload, relayOn, modeOffline, offMs);
 
-  // Firebase
   if (wifiConnected) {
     unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now/1000;
     sendToFirebase(voltage, current, power, pf, frequency,
