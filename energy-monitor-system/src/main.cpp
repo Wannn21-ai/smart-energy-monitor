@@ -80,12 +80,14 @@ const int DISCONNECT_THRESHOLD = 2;
 #define FS_HISTORY_PATH  "/history_offline.json"
 
 // ================================================================
-// STATE — SYSTEM
+// STATE — SYSTEM & MODE MANAGEMENT
 // ================================================================
 bool wifiConnected = false;
 bool ntpSynced     = false;
-bool modeOffline   = false;
-unsigned long offlineStartMs = 0;
+bool modeOffline   = false;           // TRUE = offline, FALSE = online
+unsigned long offlineStartMs = 0;     // waktu WiFi putus
+unsigned long lastModeTransitionMs = 0; // debounce rapid mode transitions
+const unsigned long MODE_TRANSITION_DEBOUNCE = 2000; // min 2s antar transition
 
 // ================================================================
 // STATE — SENSOR & RELAY
@@ -186,9 +188,10 @@ bool fsInit() {
 // ================================================================
 // ① WRITE SESSION CHECKPOINT → session_active.json
 // Format: {"name":"...","start":ts,"energy_wh":x,"kwh":x,"cost":x}
+// Return: true jika berhasil disimpan
 // ================================================================
-void fsWriteSession() {
-  if (!sessionActive || strlen(sessionDeviceName) == 0) return;
+bool fsWriteSession() {
+  if (!sessionActive || strlen(sessionDeviceName) == 0) return false;
 
   StaticJsonDocument<256> doc;
   doc["name"]      = sessionDeviceName;
@@ -199,10 +202,21 @@ void fsWriteSession() {
   doc["relay"]     = relayOn;
 
   File f = LittleFS.open(FS_SESSION_PATH, "w");
-  if (!f) { Serial.println("[FS] Gagal tulis session"); return; }
-  serializeJson(doc, f);
+  if (!f) { 
+    Serial.println("[FS] ✗ Gagal tulis session (file not opened)");
+    return false;
+  }
+  
+  size_t bytesWritten = serializeJson(doc, f);
   f.close();
-  Serial.printf("[FS] Checkpoint: %s %.4f kWh\n", sessionDeviceName, sessionKwh);
+  
+  if (bytesWritten == 0) {
+    Serial.println("[FS] ✗ Gagal tulis session (serialize failed)");
+    return false;
+  }
+  
+  Serial.printf("[FS] ✓ Checkpoint: %s %.4f kWh\n", sessionDeviceName, sessionKwh);
+  return true;
 }
 
 // ================================================================
@@ -432,32 +446,113 @@ void setRelay(bool on, const char* reason) {
 }
 
 // ================================================================
+// ONLINE/OFFLINE MODE MANAGEMENT
+// ================================================================
+// Fungsi untuk transition ke ONLINE MODE
+// - Relay OFF (menunggu command dari web)
+// - Siap untuk sync history offline
+// - Protected dengan debounce untuk avoid rapid mode flapping
+void transitionToOnlineMode() {
+  if (modeOffline == false) return; // Sudah online
+  
+  // Debounce: prevent rapid mode transitions
+  unsigned long now = millis();
+  if (now - lastModeTransitionMs < MODE_TRANSITION_DEBOUNCE) {
+    Serial.printf("[Mode] ⚠ Rapid transition ignored (debounce)\n");
+    return;
+  }
+  lastModeTransitionMs = now;
+  
+  modeOffline = false;
+  wifiConnected = true;
+  offlineStartMs = 0;
+  
+  Serial.println("[Mode] → ONLINE (WiFi tersedia)");
+  Serial.println("[Mode-Online] Relay OFF — menunggu command web");
+  Serial.println("[Mode-Online] Sync offline history...");
+  
+  // Relay OFF untuk online mode (menunggu command web)
+  // Tapi cek dulu apakah session aktif perlu disimpan
+  if (relayOn && sessionActive && hadDataOnce) {
+    fsWriteSession();
+    Serial.println("[Mode-Online] Checkpoint sesi sebelum switch mode");
+  }
+  
+  // Clear command jika ada
+  clearFirebaseCommand();
+  
+  // Sync offline history jika ada
+  fsSyncOfflineHistoryToFirebase();
+}
+
+// Fungsi untuk transition ke OFFLINE MODE
+// - Relay ON otomatis
+// - Auto-monitor device
+// - Protected dengan debounce
+void transitionToOfflineMode() {
+  if (modeOffline == true) return; // Sudah offline
+  
+  // Debounce: prevent rapid mode transitions
+  unsigned long now = millis();
+  if (now - lastModeTransitionMs < MODE_TRANSITION_DEBOUNCE) {
+    Serial.printf("[Mode] ⚠ Rapid transition ignored (debounce)\n");
+    return;
+  }
+  lastModeTransitionMs = now;
+  
+  modeOffline = true;
+  wifiConnected = false;
+  offlineStartMs = now;
+  
+  Serial.println("[Mode] → OFFLINE (WiFi tidak tersedia / terputus)");
+  
+  // Jika relay belum ON, nyalakan untuk offline mode
+  if (!relayOn) {
+    if (strlen(sessionDeviceName) == 0)
+      generateOfflineDeviceName();
+    sessionStartTs = now / 1000;
+    setRelay(true, "mode offline");
+    Serial.printf("[Mode-Offline] Relay ON — device: %s\n", sessionDeviceName);
+  } else {
+    // Relay sudah ON, generate nama device baru jika belum ada
+    if (strlen(sessionDeviceName) == 0)
+      generateOfflineDeviceName();
+    Serial.printf("[Mode-Offline] Relay tetap ON — device: %s\n", sessionDeviceName);
+  }
+}
+
+// ================================================================
 // DEVICE DISCONNECT
 // ================================================================
 void handleDeviceDisconnect() {
   if (!relayOn || !sessionActive) return;
   if (!deviceConnected && prevDevConn) {
     disconnectCount++;
-    Serial.printf("[Disconnect] %d/%d\n", disconnectCount, DISCONNECT_THRESHOLD);
+    Serial.printf("[Disconnect] Attempt %d/%d\n", disconnectCount, DISCONNECT_THRESHOLD);
     if (disconnectCount >= DISCONNECT_THRESHOLD) {
-      Serial.println("[Disconnect] Device dicabut — relay OFF, simpan sesi");
+      Serial.println("[Disconnect] ✓ Device dicabut — relay OFF, simpan sesi");
 
       // Simpan sesi ke history
       unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
+      bool historyOk = false;
+      
       if (wifiConnected) {
         String dur = buildDuration(sessionStartTs, nowTs);
-        pushHistoryToFirebase(
+        historyOk = pushHistoryToFirebase(
           sessionDeviceName, dur.c_str(),
           lastP, sessionKwh, sessionCost,
           nowTs, false, false
         );
         sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, true, nowTs);
+        if (historyOk) Serial.println("[Disconnect] ✓ History pushed to Firebase");
+        else Serial.println("[Disconnect] ✗ History push failed");
       } else {
         // Simpan ke LittleFS untuk di-sync nanti
         fsAppendOfflineHistory(
           sessionDeviceName, sessionStartTs, nowTs,
           sessionKwh, sessionCost, lastP, false
         );
+        Serial.println("[Disconnect] ✓ History saved to offline queue");
       }
 
       setRelay(false, "device dicabut");
@@ -476,22 +571,27 @@ void handleOverload(float power) {
   bool newOvl = deviceConnected && (power >= overloadThreshold);
   if (newOvl && !isOverload) {
     isOverload = true;
-    Serial.printf("[Overload] %.1fW >= %.0fW — relay OFF\n", power, overloadThreshold);
+    Serial.printf("[Overload] ⚠ ALERT: %.1fW >= %.0fW — relay OFF\n", power, overloadThreshold);
 
     // Simpan sesi ke history dengan tag overload
     unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
+    bool historyOk = false;
+    
     if (wifiConnected) {
       String dur = buildDuration(sessionStartTs, nowTs);
-      pushHistoryToFirebase(
+      historyOk = pushHistoryToFirebase(
         sessionDeviceName, dur.c_str(),
         power, sessionKwh, sessionCost,
         nowTs, false, true   // wasOverload = true
       );
+      if (historyOk) Serial.println("[Overload] ✓ Overload history pushed");
+      else Serial.println("[Overload] ✗ Overload history push failed");
     } else {
       fsAppendOfflineHistory(
         sessionDeviceName, sessionStartTs, nowTs,
         sessionKwh, sessionCost, power, true
       );
+      Serial.println("[Overload] ✓ Overload history saved to offline queue");
     }
 
     setRelay(false, "overload");
@@ -501,7 +601,7 @@ void handleOverload(float power) {
     sessionDeviceName[0] = '\0';
   } else if (!newOvl && isOverload) {
     isOverload = false;
-    Serial.println("[Overload] Teratasi");
+    Serial.println("[Overload] ✓ Teratasi");
   }
 }
 
@@ -589,11 +689,16 @@ void pollCommandFromFirebase() {
   if (!wifiConnected || WiFi.status() != WL_CONNECTED) return;
   WiFiClientSecure c; c.setInsecure(); c.setTimeout(5000);
   HTTPClient h;
-  if (!h.begin(c, String(FIREBASE_HOST) + "/command/relay.json")) return;
+  if (!h.begin(c, String(FIREBASE_HOST) + "/command/relay.json")) {
+    Serial.println("[Command] ✗ Gagal koneksi Firebase");
+    return;
+  }
+  
   int code = h.GET();
   if (code == 200) {
     String pl = h.getString(); pl.trim(); h.end();
     if (pl == "true" && !relayOn) {
+      // Web command: turn relay ON (untuk online mode)
       sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
       hadDataOnce=false; disconnectCount=0; isOverload=false;
       overloadAlertLinger=false;
@@ -604,8 +709,9 @@ void pollCommandFromFirebase() {
       unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
       sessionStartTs = nowTs;
       clearFirebaseCommand();
+      Serial.println("[Command] ✓ Relay ON (from web)");
     } else if (pl == "false" && relayOn) {
-      // Stop session dari web — simpan history dulu
+      // Web command: turn relay OFF (stop session)
       unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
       if (sessionActive && sessionKwh > 0) {
         String dur = buildDuration(sessionStartTs, nowTs);
@@ -620,8 +726,14 @@ void pollCommandFromFirebase() {
       hadDataOnce=false; prevDevConn=false; disconnectCount=0;
       sessionDeviceName[0] = '\0';
       clearFirebaseCommand();
+      Serial.println("[Command] ✓ Relay OFF (from web)");
     }
-  } else h.end();
+  } else if (code != 0) {
+    Serial.printf("[Command] ✗ Firebase error: %d\n", code);
+    h.end();
+  } else {
+    h.end();
+  }
 }
 
 void syncThresholdFromFirebase() {
@@ -735,6 +847,11 @@ void doSessionRecovery() {
 // ③ GENERATE OFFLINE DEVICE NAME — "Offline Device N"
 // ================================================================
 void generateOfflineDeviceName() {
+  // Guard: jangan generate jika sudah ada nama yang valid
+  if (strlen(sessionDeviceName) > 0) {
+    return;
+  }
+  
   // Cek berapa sesi offline yang sudah ada untuk buat nama unik
   int count = fsCountOfflineHistory();
   snprintf(sessionDeviceName, sizeof(sessionDeviceName),
@@ -1445,13 +1562,21 @@ void setup() {
   oledStatus("AP: SEM-Config", "pw: 12345678");
   delay(1500);
 
-  oledStatus("Connecting WiFi...", "");
+  // ═══════════════════════════════════════════════════════════════
+  // ONLINE/OFFLINE MODE DETECTION & SETUP
+  // ═══════════════════════════════════════════════════════════════
+  oledStatus("Checking WiFi...", "");
   wifiConnected = tryConnectWiFi(20);
 
   if (wifiConnected) {
-    modeOffline = false;
+    // ─────────────────────────────────────────────────────────────
+    // ★ ONLINE MODE STARTUP
+    // ─────────────────────────────────────────────────────────────
+    Serial.println("[Boot] ★ STARTUP: WiFi FOUND → ONLINE MODE");
+    transitionToOnlineMode();
+    
     WiFi.setSleep(false);
-    oledStatus("WiFi OK", "Sync NTP...");
+    oledStatus("WiFi OK ✓", "Sync NTP...");
     ntpSynced = tryNTPSync();
     delay(800);
     syncThresholdFromFirebase();
@@ -1460,34 +1585,46 @@ void setup() {
     // ② Session recovery — harus setelah NTP sync agar timestamp akurat
     doSessionRecovery();
 
-    // ④ Sync offline history yang mungkin tertinggal
+    // ④ Sync offline history yang mungkin tertinggal dari mode offline sebelumnya
     fsSyncOfflineHistoryToFirebase();
 
     unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : millis()/1000;
     sendToFirebase(0,0,0,0,0,0,0,false,false,false,ts);
-    Serial.println("[Boot] Online — relay OFF, tunggu perintah web");
+    
+    oledStatus("Online Ready ✓", "Waiting for web");
+    delay(1000);
+    Serial.println("[Boot-Online] Relay OFF — menunggu command web");
   } else {
-    modeOffline = true; offlineStartMs = millis();
+    // ─────────────────────────────────────────────────────────────
+    // ★ OFFLINE MODE STARTUP
+    // ─────────────────────────────────────────────────────────────
+    Serial.println("[Boot] ★ STARTUP: WiFi NOT FOUND → OFFLINE MODE");
+    transitionToOfflineMode();
+    
+    // Consistency check: pastikan state sudah konsisten
+    if (!relayOn) {
+      Serial.println("[Boot] ⚠ Relay should be ON in offline mode, forcing ON");
+      digitalWrite(PIN_RELAY, RELAY_ON);
+      relayOn = true;
+      sessionActive = true;
+    }
+    
     sessionEnergyWh=0; sessionKwh=0; sessionCost=0;
     hadDataOnce=false; disconnectCount=0; isOverload=false;
     overloadAlertLinger=false;
 
-    // ② Session recovery juga dicoba saat offline (push akan antri ke history_offline.json)
+    // ② Session recovery juga dicoba saat offline
     doSessionRecovery();
 
-    // ③ Generate nama device untuk mode offline
-    generateOfflineDeviceName();
-    sessionStartTs = millis() / 1000;
-
-    setRelay(true, "mode offline otomatis");
-    oledStatus("Mode OFFLINE", sessionDeviceName);
-    delay(1500);
     lastReconnectMs = millis();
-    Serial.printf("[Boot] Offline — relay ON, device: %s\n", sessionDeviceName);
+    
+    oledStatus("Offline Mode ✓", sessionDeviceName);
+    delay(1500);
+    Serial.printf("[Boot-Offline] Relay ON — waiting for device (%s)\n", sessionDeviceName);
   }
 
   lastLoopMs = lastThresholdSyncMs = lastCommandPollMs = lastCheckpointMs
-             = lastOfflineSyncRetryMs = millis();
+             = lastOfflineSyncRetryMs = lastModeTransitionMs = millis();
 }
 
 // ================================================================
@@ -1504,43 +1641,75 @@ void loop() {
   handleGreenLed();
   handleOverloadAlert();
 
-  // ── WiFi disconnect detection ─────────────────────────────
-  if (wifiConnected && WiFi.status() != WL_CONNECTED) {
-    wifiConnected = false;
-    if (!modeOffline) offlineStartMs = now;
-    modeOffline = true;
-    digitalWrite(PIN_LED_BLUE, LOW);
-    lastReconnectMs = now;
-    Serial.println("[WiFi] Terputus");
-    if (!relayOn) {
-      // Relay sedang OFF saat WiFi putus → nyalakan relay untuk offline mode
-      // ③ Generate nama baru hanya jika tidak ada sesi aktif
-      if (strlen(sessionDeviceName) == 0)
-        generateOfflineDeviceName();
-      sessionStartTs = now / 1000;
-      setRelay(true, "mode offline (WiFi putus)");
-    }
-    // Simpan checkpoint terakhir sebelum masuk offline
-    if (sessionActive && hadDataOnce) fsWriteSession();
+  // ── Session consistency check ────────────────────────────────
+  // Jika relayOn tapi !sessionActive, atau sebaliknya, fix state
+  if (relayOn && !sessionActive) {
+    sessionActive = true;
+    Serial.println("[State] ⚠ Fixed: relayOn=true but sessionActive=false, correcting...");
+  }
+  if (!relayOn && sessionActive && !modeOffline) {
+    sessionActive = false;
+    Serial.println("[State] ⚠ Fixed: relayOff but sessionActive=true, correcting...");
   }
 
-  // ── Auto-reconnect setiap 60 detik ───────────────────────
+  // ── WiFi disconnect detection & mode transition ────────────
+  if (wifiConnected && WiFi.status() != WL_CONNECTED) {
+    // ★ ONLINE MODE → OFFLINE MODE TRANSITION
+    wifiConnected = false;
+    digitalWrite(PIN_LED_BLUE, LOW);
+    lastReconnectMs = now;
+    
+    Serial.println("[WiFi] ✗ DISCONNECTED — Mode transition starting...");
+    transitionToOfflineMode();
+    
+    // Simpan checkpoint sesi terakhir sebelum masuk offline
+    if (sessionActive && hadDataOnce) {
+      bool saved = fsWriteSession();
+      if (saved) {
+        Serial.println("[WiFi-Disconnect] ✓ Checkpoint sesi disimpan ke LittleFS");
+      } else {
+        Serial.println("[WiFi-Disconnect] ✗ Checkpoint gagal, data mungkin hilang");
+      }
+    }
+    oledStatus("WiFi Putus!", "Offline Mode ON");
+    delay(1000);
+  }
+
+  // ── Auto-reconnect WiFi setiap 60 detik ───────────────────
   if (!wifiConnected && now - lastReconnectMs >= RECONNECT_INTERVAL) {
     lastReconnectMs = now;
+    Serial.println("[WiFi] Trying to reconnect...");
+    
     wifiConnected = tryConnectWiFi(15);
+    
     if (wifiConnected) {
-      modeOffline = false; WiFi.setSleep(false);
+      // ★ OFFLINE MODE → ONLINE MODE TRANSITION
+      Serial.println("[WiFi] ✓ RECONNECTED — Mode transition starting...");
+      transitionToOnlineMode();
+      
+      WiFi.setSleep(false);
       if (!ntpSynced) ntpSynced = tryNTPSync();
       syncThresholdFromFirebase();
-      // ④ Sync offline history saat reconnect
-      fsSyncOfflineHistoryToFirebase();
+      
+      // Sync offline history yang tertinggal saat offline
+      int pendingCount = fsCountOfflineHistory();
+      if (pendingCount > 0) {
+        Serial.printf("[WiFi-Reconnect] Syncing %d offline sessions...\n", pendingCount);
+        fsSyncOfflineHistoryToFirebase();
+        oledStatus("Sync history...", "Please wait");
+        delay(1000);
+      }
+      
+      // Kirim live data ke Firebase untuk confirm online
       unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now/1000;
       sendToFirebase(lastV, lastI, lastP, lastPF, lastHz,
                      sessionKwh, sessionCost,
                      deviceConnected, isOverload, relayOn, ts);
-      Serial.printf("[WiFi] Online! Offline %.0fs\n", (float)(now-offlineStartMs)/1000);
-      oledStatus("WiFi Kembali!", "Sync data...");
-      delay(800);
+      
+      unsigned long offlineDuration = (now - offlineStartMs) / 1000;
+      Serial.printf("[WiFi-Reconnect] Back Online! Offline duration: %lu seconds\n", offlineDuration);
+      oledStatus("Back Online ✓", "Synced!");
+      delay(1000);
     }
   }
 
@@ -1550,18 +1719,24 @@ void loop() {
     syncThresholdFromFirebase();
   }
 
-  // ── Poll relay command (online only) ─────────────────────
+  // ── Poll relay command (ONLINE MODE ONLY) ────────────────
+  // Dalam online mode, relay dikendalikan oleh web command
+  // Tidak ada relay ON otomatis di online mode
   if (wifiConnected && !modeOffline && now - lastCommandPollMs >= COMMAND_POLL_INTERVAL) {
     lastCommandPollMs = now;
     pollCommandFromFirebase();
   }
 
-  // ④ Retry sync offline history jika ada yang belum ter-sync
+  // ── Retry sync offline history (ONLINE MODE) ────────────
+  // Coba sync ulang history offline yang belum ter-push
   if (wifiConnected && now - lastOfflineSyncRetryMs >= OFFLINE_SYNC_RETRY_INTERVAL) {
     lastOfflineSyncRetryMs = now;
     if (LittleFS.exists(FS_HISTORY_PATH)) {
-      Serial.println("[Sync] Retry sync offline history...");
-      fsSyncOfflineHistoryToFirebase();
+      int pendingCount = fsCountOfflineHistory();
+      if (pendingCount > 0) {
+        Serial.printf("[Sync-Retry] Trying to sync %d pending offline sessions...\n", pendingCount);
+        fsSyncOfflineHistoryToFirebase();
+      }
     }
   }
 
@@ -1605,10 +1780,15 @@ void loop() {
 
   prevDevConn = deviceConnected;
 
-  Serial.printf("[%s] Relay:%s Dev:%s(%s) V:%.1f I:%.2f P:%.1f E:%.4f Ovl:%s\n",
-    modeOffline?"OFF":"ONL", relayOn?"ON":"OFF",
-    deviceConnected?"Y":"N", sessionDeviceName,
-    voltage, current, power, sessionKwh, isOverload?"YES":"no");
+  // Log status saat ini
+  const char* modeStr = modeOffline ? "OFF" : "ONL";
+  const char* relayStr = relayOn ? "ON" : "OFF";
+  const char* devStr = deviceConnected ? "Y" : "N";
+  const char* ovlStr = isOverload ? "YES" : "no";
+  
+  Serial.printf("[%s-Mode] Relay:%s Dev:%s(%s) V:%.1f I:%.2f P:%.1f E:%.4f Ovl:%s\n",
+    modeStr, relayStr, devStr, sessionDeviceName,
+    voltage, current, power, sessionKwh, ovlStr);
 
   unsigned long offMs = modeOffline ? (now - offlineStartMs) : 0;
   oledData(voltage, current, power, pf, frequency,
@@ -1616,6 +1796,7 @@ void loop() {
            deviceConnected, wifiConnected,
            isOverload, relayOn, modeOffline, offMs);
 
+  // ── Send live data to Firebase (ONLINE MODE ONLY) ────────
   if (wifiConnected) {
     unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now/1000;
     sendToFirebase(voltage, current, power, pf, frequency,

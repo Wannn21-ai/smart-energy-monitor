@@ -55,6 +55,7 @@ let firebaseOverload = false;
 let firebaseRelay    = false;
 let firebaseOffline  = false;
 let systemInternet   = false;
+let deviceNameFromEsp = "—";  // Device name dari ESP32 (untuk offline mode)
 
 // ================= STATE — WEB =================
 let systemOnline = false;
@@ -199,14 +200,22 @@ function showOfflineBanner(firstDetectedAt) {
   const lastSeen = firebaseTimestamp > 0
     ? new Date(firebaseTimestamp * 1000).toLocaleTimeString("id-ID")
     : "—";
-  if (subEl) subEl.textContent = `Data terakhir: ${lastSeen}`;
-
+  
+  // Update banner text berdasarkan kondisi ESP32
   if (!systemInternet && firebaseTimestamp > 0) {
-    if (titleEl) titleEl.textContent = "ESP32 terputus dari internet";
-  } else if (firebaseOffline) {
-    if (titleEl) titleEl.textContent = "ESP32 mode OFFLINE (tidak ada WiFi)";
+    if (titleEl) titleEl.textContent = "⚠ ESP32 tidak terhubung ke internet";
+    if (firebaseOffline && firebaseRelay) {
+      // ESP32 dalam mode offline dengan relay ON
+      if (subEl) subEl.textContent = `Mode: Offline • Device: ${deviceNameFromEsp} • Data terakhir: ${lastSeen}`;
+    } else {
+      if (subEl) subEl.textContent = `Data terakhir: ${lastSeen}`;
+    }
+  } else if (firebaseOffline && firebaseTimestamp > 0) {
+    if (titleEl) titleEl.textContent = "📡 ESP32 Mode: OFFLINE";
+    if (subEl) subEl.textContent = `Device: ${deviceNameFromEsp} • Relay: ON • Mengukur lokal • Data terakhir: ${lastSeen}`;
   } else {
-    if (titleEl) titleEl.textContent = "ESP32 tidak merespons";
+    if (titleEl) titleEl.textContent = "⚠ ESP32 tidak merespons";
+    if (subEl) subEl.textContent = `Data terakhir: ${lastSeen}`;
   }
 
   if (offlineDurationInterval) clearInterval(offlineDurationInterval);
@@ -225,6 +234,46 @@ function hideOfflineBanner() {
   if (offlineDurationInterval) {
     clearInterval(offlineDurationInterval);
     offlineDurationInterval = null;
+  }
+}
+
+// ================================================================
+// BANNER: MODE STATUS & PENDING OFFLINE SESSIONS
+// ================================================================
+let modeStatusBanner = document.getElementById("mode-status-banner");
+if (!modeStatusBanner) {
+  modeStatusBanner = document.createElement("div");
+  modeStatusBanner.id = "mode-status-banner";
+  modeStatusBanner.style.cssText = `
+    display:none; align-items:center; justify-content:space-between; gap:12px;
+    background:rgba(255,171,0,0.08); border:1px solid rgba(255,171,0,0.3);
+    border-radius:var(--radius-md); padding:12px 16px; margin-bottom:14px;
+    color:var(--amber); font-size:12px; font-weight:600;`;
+  modeStatusBanner.innerHTML = `
+    <span id="mode-status-text">⚠ Mode: OFFLINE • Relay: ON</span>
+    <span id="pending-sync-badge" style="display:none;
+      background:rgba(255,171,0,0.2);border:1px solid rgba(255,171,0,0.4);
+      padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;">
+      0 Pending
+    </span>`;
+
+  const ob = document.getElementById("overload-banner");
+  if (ob?.parentNode) ob.parentNode.insertBefore(modeStatusBanner, ob);
+  else document.querySelector(".page-content")?.prepend(modeStatusBanner);
+}
+
+function updateModeStatusBanner(isOnline, relayOn, pendingCount = 0) {
+  if (!isOnline && relayOn) {
+    modeStatusBanner.style.display = "flex";
+    const textEl = document.getElementById("mode-status-text");
+    const badgeEl = document.getElementById("pending-sync-badge");
+    if (textEl) textEl.textContent = `📡 Mode: OFFLINE • Relay: ON`;
+    if (badgeEl) {
+      badgeEl.style.display = pendingCount > 0 ? "inline-block" : "none";
+      badgeEl.textContent = `${pendingCount} Pending Sync`;
+    }
+  } else {
+    modeStatusBanner.style.display = "none";
   }
 }
 
@@ -267,10 +316,10 @@ if (!offlineSessionBanner) {
   offlineSessionBanner.innerHTML = `
     <span style="font-size:18px;">📡</span>
     <div>
-      <div style="font-weight:600;margin-bottom:2px;">
+      <div style="font-weight:600;margin-bottom:2px;" id="offline-session-title">
         ESP32 mengukur dalam mode offline
       </div>
-      <div style="font-size:12px;color:var(--text-muted);">
+      <div style="font-size:12px;color:var(--text-muted);" id="offline-session-sub">
         Data akan ditampilkan saat ESP32 kembali terhubung ke internet
       </div>
     </div>`;
@@ -280,8 +329,14 @@ if (!offlineSessionBanner) {
   else document.querySelector(".page-content")?.prepend(offlineSessionBanner);
 }
 
-function setOfflineSessionBanner(show) {
+function setOfflineSessionBanner(show, deviceName = "—") {
   offlineSessionBanner.style.display = show ? "flex" : "none";
+  if (show && deviceName && deviceName !== "—") {
+    const titleEl = document.getElementById("offline-session-title");
+    const subEl = document.getElementById("offline-session-sub");
+    if (titleEl) titleEl.textContent = `📡 ${deviceName} (Mode Offline)`;
+    if (subEl) subEl.textContent = `Relay ON • Data disimpan lokal • Akan tersinkron saat online`;
+  }
 }
 
 // ================= CHART OPTIONS =================
@@ -556,17 +611,18 @@ async function openModalAuto() {
 
 async function openModalManual() {
   if (!systemOnline) {
-    showToast("ESP32 tidak terhubung ke internet", "error"); return;
+    showToast("⚠ ESP32 tidak terhubung — Hanya bisa memulai di Online Mode", "error"); 
+    return;
   }
   if (isRunning && !deviceOnline) {
-    showToast(`"${activeDevice.name}" sedang dimonitor`, "error");
+    showToast(`⚠ "${activeDevice.name}" sedang dimonitor`, "error");
     return;
   }
   waitingForName = false;
   const history   = await getHistory();
   const usedNames = history.map(h => h.name);
   document.querySelector("#modal-add-device .modal-title")
-    .textContent = "Tambah Device";
+    .textContent = "Tambah Device (Online Mode)";
   document.querySelector("#modal-add-device .modal-sub")
     .textContent = "Berikan nama device, lalu klik Start Monitoring untuk menyalakan relay.";
   inputDevName.value = "";
@@ -641,6 +697,7 @@ onValue(ref(db, "live"), snapshot => {
   firebaseTimestamp = sys.timestamp || 0;
   firebaseRelay     = sys.relay     === true;
   firebaseOffline   = sys.offline   === true;
+  deviceNameFromEsp = sys.deviceName || "Device";  // Ambil nama device dari ESP32
 
   const dev = data.device || {};
   voltage          = dev.voltage   || 0;
@@ -704,7 +761,13 @@ async function updateMeters() {
   }
 
   // ── Offline session banner ──────────────────────────────
-  setOfflineSessionBanner(firebaseOffline && firebaseRelay && !systemOnline);
+  // Tampilkan banner saat ESP32 dalam mode offline dengan relay ON
+  setOfflineSessionBanner(firebaseOffline && firebaseRelay && !systemOnline, deviceNameFromEsp);
+  
+  // ── Mode status banner ────────────────────────────────
+  // Tampilkan badge mode offline dengan jumlah sesi pending sync
+  // TODO: Get pending count dari API atau Firebase
+  updateModeStatusBanner(!systemOnline, firebaseRelay, 0);
 
   // ── Update status bar ──────────────────────────────────
   setSystemStatus(systemOnline);
@@ -750,11 +813,17 @@ async function updateMeters() {
   }
 
   // ── Transfer data offline → online ────────────────────
+  // Saat esp32 reconnect dari offline mode, data akan disinkron
   if (systemOnline && prevSystemOnline === false && isRunning && activeDevice) {
     if (firebaseEnergy > 0) {
       lastknownEnergy = firebaseEnergy;
       console.log(`[Transfer] Offline→Online: E=${firebaseEnergy.toFixed(4)} kWh`);
-      showToast(`📡 Data offline tersinkron: ${firebaseEnergy.toFixed(4)} kWh`, "success");
+      showToast(
+        `✓ ESP32 online • Data offline tersinkron: ${firebaseEnergy.toFixed(4)} kWh`, 
+        "success"
+      );
+    } else {
+      showToast(`✓ ESP32 online • Mode: ${firebaseOffline ? "OFFLINE" : "ONLINE"}`, "success");
     }
   }
 
