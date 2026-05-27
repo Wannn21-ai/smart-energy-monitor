@@ -71,12 +71,12 @@ void setup() {
     startLocalAP();
     setupWebServer();
 
-    oledStatus("AP: SEM-Config", "pw: 12345678");
+    oledStatus("AP: SEM-Setup", "pw: 12345678");
     delay(1500);
 
     // ── Detect startup mode ──────────────────────────────────────
     oledStatus("Checking WiFi...", "");
-    wifiConnected = tryConnectWiFi(20);
+    wifiConnected = tryConnectWiFi(WIFI_OFFLINE_GRACE_MS / 1000UL);
 
     if (wifiConnected) {
         // ★ ONLINE MODE
@@ -132,6 +132,7 @@ void setup() {
 // ================================================================
 void loop() {
     unsigned long now = millis();
+    static unsigned long wifiLostSinceMs = 0;
 
     // ── Serve web & button ───────────────────────────────────────
     networkHandleClients();
@@ -148,8 +149,14 @@ void loop() {
         wifiConnected = false;
         digitalWrite(PIN_LED_BLUE, LOW);
         lastReconnectMs = now;
+        wifiLostSinceMs = now;
         if (sessionActive && hadDataOnce) fsWriteSession();
-        transitionToOfflineMode("wifi lost");
+        Serial.println("[WiFi] Waiting grace period before offline mode");
+    }
+
+    if (!wifiConnected && !modeOffline && wifiLostSinceMs > 0 &&
+        (now - wifiLostSinceMs >= WIFI_OFFLINE_GRACE_MS)) {
+        transitionToOfflineMode("wifi lost for 5 minutes");
     }
 
     // ── Auto-reconnect setiap 60s ─────────────────────────────────
@@ -157,7 +164,9 @@ void loop() {
         lastReconnectMs = now;
         Serial.println("[WiFi] Trying reconnect...");
         if (tryConnectWiFi(15)) {
-            transitionToOnlineMode();
+            if (modeOffline) transitionToOnlineMode();
+            else wifiConnected = true;
+            wifiLostSinceMs = 0;
             WiFi.setSleep(false);
             if (!ntpSynced) ntpSynced = tryNTPSync();
             syncThresholdFromFirebase();

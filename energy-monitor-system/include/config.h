@@ -17,7 +17,7 @@
 #define RELAY_OFF  HIGH
 
 // ── AP & Firebase ────────────────────────────────────────────────
-#define AP_SSID  "SEM-Config"
+#define AP_SSID  "SEM-Setup"
 #define AP_PASS  "12345678"
 
 #define FIREBASE_HOST "https://smart-energy-monitor-v2-de79d-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -34,6 +34,7 @@
 // ── Timing Constants (ms) ────────────────────────────────────────
 #define LOOP_INTERVAL              5000UL
 #define RECONNECT_INTERVAL         60000UL
+#define WIFI_OFFLINE_GRACE_MS      300000UL
 #define THRESHOLD_SYNC_INTERVAL    30000UL
 #define COMMAND_POLL_INTERVAL      2000UL
 #define OVERLOAD_BLINK_MS          200UL
