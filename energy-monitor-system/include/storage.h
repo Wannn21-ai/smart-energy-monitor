@@ -19,7 +19,8 @@ bool fsInit();
 bool fsWriteSession();
 void fsClearSession();
 bool fsReadSession(float &outEnergyWh, float &outKwh, float &outCost,
-                   char *outName, unsigned long &outStartTs);
+                   char *outName, unsigned long &outStartTs,
+                   unsigned long &outElapsedSec);
 
 // ── Offline History Queue ────────────────────────────────────────
 void fsAppendOfflineHistory(const char* name, unsigned long startTs,

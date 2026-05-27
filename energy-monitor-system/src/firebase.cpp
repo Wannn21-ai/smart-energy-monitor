@@ -103,24 +103,34 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
     else
         strlcpy(displayName, name, sizeof(displayName));
 
-    char path[128];
-    snprintf(path, sizeof(path), "/shared_history/%lu.json", (unsigned long)(ts * 1000UL));
+    unsigned long historyKey = (unsigned long)(ts * 1000UL);
+    char path[192];
+    if (strlen(currentUid) > 0) {
+        snprintf(path, sizeof(path), "/users/%s/history/%lu.json", currentUid, historyKey);
+    } else {
+        snprintf(path, sizeof(path), "/shared_history/%lu.json", historyKey);
+    }
 
     WiFiClientSecure c; c.setInsecure(); c.setTimeout(10000);
     HTTPClient h;
     h.begin(c, String(FIREBASE_HOST) + String(path));
     h.addHeader("Content-Type", "application/json");
 
-    char body[512];
+    String safeName = jsonEscape(displayName);
+    String safeDuration = jsonEscape(duration);
+    String safeSessionId = jsonEscape(currentSessionId);
+
+    char body[640];
     snprintf(body, sizeof(body),
         "{\"name\":\"%s\",\"duration\":\"%s\",\"power\":%.1f,"
         "\"energy\":%.4f,\"cost\":\"%s\",\"date\":\"%s\","
-        "\"timestamp\":%lu,\"isOverload\":%s,\"recovered\":%s}",
-        displayName, duration, avgPower,
+        "\"timestamp\":%lu,\"isOverload\":%s,\"recovered\":%s,\"sessionId\":\"%s\"}",
+        safeName.c_str(), safeDuration.c_str(), avgPower,
         energyKwh, costStr, dateStr,
-        (unsigned long)(ts * 1000UL),
+        historyKey,
         wasOverload ? "true" : "false",
-        recovered   ? "true" : "false");
+        recovered   ? "true" : "false",
+        safeSessionId.c_str());
 
     int code = h.PUT(body);
     h.end();
@@ -179,7 +189,7 @@ void pollCommandFromFirebase() {
 
     String pl = h.getString(); pl.trim(); h.end();
 
-    bool hasCommand = false, cmdStart = false, cmdStop = false;
+    bool hasCommand = false, cmdStart = false, cmdStop = false, cmdSkipHistory = false;
     char cmdId[48]="", cmdUid[64]="", cmdSessionId[48]="", cmdDeviceName[32]="";
     float cmdTarif = 0, cmdThreshold = 0;
 
@@ -200,6 +210,7 @@ void pollCommandFromFirebase() {
         strlcpy(cmdDeviceName, doc["deviceName"] | "", sizeof(cmdDeviceName));
         cmdTarif     = doc["tariff"]    | 0.0f;
         cmdThreshold = doc["threshold"] | 0.0f;
+        cmdSkipHistory = doc["skipHistory"] | false;
     }
 
     if (!hasCommand || (!cmdStart && !cmdStop)) return;
@@ -236,11 +247,15 @@ void pollCommandFromFirebase() {
 
     } else if (cmdStop && relayOn) {
         unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-        if (sessionActive && sessionKwh > 0) {
+        if (!cmdSkipHistory && sessionActive && sessionKwh > 0) {
             String dur = buildDuration(sessionStartTs, nowTs);
-            pushHistoryToFirebase(sessionDeviceName, dur.c_str(),
-                                  lastP, sessionKwh, sessionCost,
-                                  nowTs, false, false);
+            bool ok = pushHistoryToFirebase(sessionDeviceName, dur.c_str(),
+                                            lastP, sessionKwh, sessionCost,
+                                            nowTs, false, false);
+            if (!ok) {
+                fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
+                                      sessionKwh, sessionCost, lastP, false);
+            }
         }
         setRelay(false, "web command STOP");
         sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;

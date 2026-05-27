@@ -32,6 +32,8 @@ bool  sessionActive      = false;
 char  sessionDeviceName[32] = "";
 unsigned long sessionStartTs = 0;
 int   offlineDeviceCounter   = 0;
+bool  recoveredSessionPending = false;
+int   recoveredNoDeviceCount  = 0;
 
 // ── Last sensor readings ─────────────────────────────────────────
 float lastV = 0, lastI = 0, lastP = 0, lastPF = 0, lastHz = 0;

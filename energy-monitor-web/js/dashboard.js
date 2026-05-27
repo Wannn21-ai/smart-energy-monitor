@@ -45,7 +45,6 @@ setInterval(async () => {
 
 // ================= CONSTANTS =================
 const STALE_THRESHOLD = 15;
-const AUTO_SAVE_AFTER_OFFLINE_SEC = 60;
 
 // ================= STATE — FIREBASE DATA =================
 let voltage = 0, current = 0, firebasePower = 0, firebaseTimestamp = 0;
@@ -54,6 +53,11 @@ let firebaseEnergy = 0, firebaseCost = 0;
 let firebaseOverload = false;
 let firebaseRelay    = false;
 let firebaseOffline  = false;
+let firebaseSessionActive = false;
+let firebaseSessionStartTs = 0;
+let firebaseElapsedSec = 0;
+let firebaseSessionId = "";
+let firebaseSessionUid = "";
 let systemInternet   = false;
 let deviceNameFromEsp = "—";  // Device name dari ESP32 (untuk offline mode)
 
@@ -86,7 +90,6 @@ let pendingSessionId = null;
 let offlineDetectedAt       = null;
 let offlineBannerShown      = false;
 let reconnectToastShown     = false;
-let autoSaveTriggered       = false;
 
 // ================= RELAY COMMAND =================
 function makeId(prefix) {
@@ -532,7 +535,6 @@ async function resetMonitoring() {
   energyBaseline  = 0;
   activeDevice    = null;
   lastknownEnergy = 0;
-  autoSaveTriggered = false;
   offlineSessionStartEnergy = null;
   pendingDeviceName = null;
   pendingSessionId = null;
@@ -561,7 +563,6 @@ async function startMonitoring(name) {
   lastknownEnergy = energyBaseline;
   isRunning       = true;
   sessionSaved    = false;
-  autoSaveTriggered = false;
   offlineSessionStartEnergy = null;
   pendingSessionId = null;
 
@@ -580,6 +581,51 @@ async function startMonitoring(name) {
     showToast(`Monitoring "${name}" dimulai (${retroMin} mnt terhitung)`, "success");
   else
     showToast(`Monitoring "${name}" dimulai ▶`, "success");
+}
+
+function getEspStartTimeMs() {
+  if (firebaseElapsedSec > 0) return Date.now() - firebaseElapsedSec * 1000;
+  if (firebaseSessionStartTs > 0) return firebaseSessionStartTs * 1000;
+  return null;
+}
+
+async function alignActiveSessionFromEsp() {
+  if (!systemOnline || !firebaseRelay || !firebaseSessionActive) return false;
+  if (firebaseSessionUid && firebaseSessionUid !== uid) return false;
+  if (!isRunning && !activeDevice && !deviceOnline) return false;
+
+  const espStartTime = getEspStartTimeMs();
+  const espName = deviceNameFromEsp && deviceNameFromEsp !== "—"
+    ? deviceNameFromEsp
+    : activeDevice?.name || pendingDeviceName || "Device";
+  const espId = firebaseSessionId || activeDevice?.id || pendingSessionId || makeId("sess");
+
+  if (!isRunning || !activeDevice) {
+    activeDevice = { id: espId, name: espName };
+    startTime = espStartTime || Date.now();
+    energyBaseline = 0;
+    lastknownEnergy = firebaseEnergy;
+    isRunning = true;
+    sessionSaved = false;
+    pendingDeviceName = null;
+    pendingSessionId = null;
+    clearInterval(timerInterval);
+    timerInterval = setInterval(updateTimer, 1000);
+    if (valDeviceName)  valDeviceName.textContent  = activeDevice.name;
+    if (activeDevLabel) activeDevLabel.textContent = `Monitoring: ${activeDevice.name}`;
+    if (btnStop)        btnStop.style.display      = "inline-flex";
+    await saveActiveSession({ ...activeDevice, startTime, energyBaseline });
+    await renderDeviceTabs();
+    return true;
+  }
+
+  activeDevice = { id: espId, name: activeDevice.name || espName };
+  if (espStartTime && (!startTime || Math.abs(startTime - espStartTime) > 2000)) {
+    startTime = espStartTime;
+  }
+  lastknownEnergy = firebaseEnergy;
+  await saveActiveSession({ ...activeDevice, startTime, energyBaseline });
+  return true;
 }
 
 // ================= CHART UPDATE =================
@@ -704,7 +750,8 @@ if (btnStop) {
     await saveSession();
     await sendRelayCommand("STOP", {
       sessionId: activeDevice.id,
-      reason: "USER_STOP"
+      reason: "USER_STOP",
+      skipHistory: true
     });
     showToast("Sesi dihentikan — relay OFF ⏹", "");
     await resetMonitoring();
@@ -721,6 +768,11 @@ onValue(ref(db, "live"), snapshot => {
   firebaseTimestamp = sys.timestamp || 0;
   firebaseRelay     = sys.relay     === true;
   firebaseOffline   = sys.offline   === true;
+  firebaseSessionActive = sys.sessionActive === true;
+  firebaseSessionStartTs = sys.sessionStartTs || 0;
+  firebaseElapsedSec = sys.elapsedSec || 0;
+  firebaseSessionId = sys.sessionId || "";
+  firebaseSessionUid = sys.uid || "";
   deviceNameFromEsp = sys.deviceName || "Device";  // Ambil nama device dari ESP32
 
   const dev = data.device || {};
@@ -776,7 +828,6 @@ async function updateMeters() {
     }
     offlineDetectedAt = null;
     offlineBannerShown = false;
-    autoSaveTriggered  = false;
   } else if (firebaseTimestamp === 0 && !offlineBannerShown) {
     if (!offlineDetectedAt) offlineDetectedAt = Date.now();
     if ((Date.now() - offlineDetectedAt) / 1000 >= 10) {
@@ -816,6 +867,24 @@ async function updateMeters() {
   }
   prevRelayState = firebaseRelay;
 
+  if (systemOnline && firebaseRelay && firebaseSessionActive) {
+    const resumed = await alignActiveSessionFromEsp();
+    if (resumed && prevSystemOnline === false && reconnectToastShown) {
+      console.log(`[Transfer] ESP32 session aligned: E=${firebaseEnergy.toFixed(4)} kWh`);
+    }
+  }
+
+  if (systemOnline && isRunning && activeDevice && !firebaseRelay && !firebaseSessionActive) {
+    if (settings.notifSession)
+      showToast(`Sesi "${activeDevice.name}" selesai di ESP32`, "success");
+    await resetMonitoring();
+    await updateSessionCount();
+    await updateBarPie();
+    prevSystemOnline = systemOnline;
+    prevDeviceConnected = false;
+    return;
+  }
+
   // ── Device baru terdeteksi ─────────────────────────────
   if (!prevDeviceConnected && deviceOnline) {
     deviceConnectTime   = Date.now();
@@ -851,22 +920,6 @@ async function updateMeters() {
     }
   }
 
-  // ── Auto-save sesi saat offline > AUTO_SAVE_AFTER_OFFLINE_SEC ──
-  if (!systemOnline && isRunning && activeDevice && offlineDetectedAt && !autoSaveTriggered) {
-    const offSec = (Date.now() - offlineDetectedAt) / 1000;
-    if (offSec >= AUTO_SAVE_AFTER_OFFLINE_SEC) {
-      autoSaveTriggered = true;
-      console.log("[Auto-save] Sesi disimpan karena ESP32 offline > 60 detik");
-      saveSession().then(() => {
-        if (settings.notifSession)
-          showToast(
-            `Sesi "${activeDevice.name}" disimpan otomatis (ESP32 offline)`,
-            "success"
-          );
-      });
-    }
-  }
-
   prevSystemOnline = systemOnline;
 
   // ── Device dicabut ─────────────────────────────────────
@@ -878,8 +931,8 @@ async function updateMeters() {
       showToast("Device dicabut sebelum diberi nama", "error");
     } else if (isRunning && activeDevice) {
       if (settings.notifDisconnect)
-        showToast(`Device "${activeDevice.name}" dicabut — sesi disimpan`, "");
-      saveSession().then(() => resetMonitoring());
+        showToast(`Device "${activeDevice.name}" dicabut — menunggu history ESP32`, "");
+      await resetMonitoring();
     }
   }
   prevDeviceConnected = deviceOnline;
@@ -894,12 +947,6 @@ async function updateMeters() {
   if (!webOverload && prevOverload) {
     if (isRunning && deviceOnline) setDeviceBadge("connected");
     setOverloadBanner(false);
-    if (isRunning && activeDevice && !sessionSaved) {
-      saveSession().then(() => {
-        resetMonitoring();
-        showToast("Overload teratasi — sesi disimpan. Klik + untuk mulai lagi.", "");
-      });
-    }
   }
   prevOverload = webOverload;
 

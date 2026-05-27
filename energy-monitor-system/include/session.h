@@ -21,6 +21,7 @@ void generateOfflineDeviceName();
 
 // ── Session Recovery (dipanggil saat boot) ──────────────────────
 void doSessionRecovery();
+void handleRecoveredSessionCheck();
 
 // ── Device Disconnect & Overload ─────────────────────────────────
 void handleDeviceDisconnect();

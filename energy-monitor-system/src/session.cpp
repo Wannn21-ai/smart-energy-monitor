@@ -54,6 +54,8 @@ void setRelay(bool on, const char* reason) {
     sessionActive = on;
     if (!on) {
         disconnectCount = 0;
+        recoveredSessionPending = false;
+        recoveredNoDeviceCount = 0;
         fsClearSession();
     }
     Serial.printf("[Relay] %s — %s\n", on ? "ON" : "OFF", reason);
@@ -62,6 +64,26 @@ void setRelay(bool on, const char* reason) {
 // ================================================================
 // MODE TRANSITION → ONLINE
 // ================================================================
+static void archiveCurrentSession(unsigned long nowTs, float power, bool recovered, bool wasOverload) {
+    if (strlen(sessionDeviceName) == 0) strlcpy(sessionDeviceName, "Device", sizeof(sessionDeviceName));
+    String dur = buildDuration(sessionStartTs, nowTs);
+
+    if (wifiConnected) {
+        bool ok = pushHistoryToFirebase(sessionDeviceName, dur.c_str(),
+                                       power, sessionKwh, sessionCost,
+                                       nowTs, recovered, wasOverload);
+        Serial.printf("[Session] History push: %s\n", ok ? "OK" : "FAIL");
+        if (!ok) {
+            fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
+                                  sessionKwh, sessionCost, power, wasOverload);
+        }
+    } else {
+        fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
+                              sessionKwh, sessionCost, power, wasOverload);
+        Serial.println("[Session] History queued offline");
+    }
+}
+
 void transitionToOnlineMode() {
     if (!modeOffline) return;
 
@@ -108,22 +130,11 @@ void transitionToOfflineMode(const char* reason) {
     wifiConnected  = false;
     offlineStartMs = now;
 
-    if (!relayOn) {
-        if (strlen(sessionDeviceName) == 0) generateOfflineDeviceName();
-        unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now / 1000;
-        sessionStartTs  = ts;
-        sessionEnergyWh = 0;
-        sessionKwh      = 0;
-        sessionCost     = 0;
-        hadDataOnce     = false;
-        disconnectCount = 0;
-        isOverload      = false;
-        overloadAlertLinger = false;
-        setRelay(true, "offline mode auto-start");
-        Serial.printf("[Mode→Offline] Relay ON — device: %s\n", sessionDeviceName);
-    } else {
+    if (relayOn) {
         if (strlen(sessionDeviceName) == 0) generateOfflineDeviceName();
         Serial.printf("[Mode→Offline] Relay tetap ON — device: %s\n", sessionDeviceName);
+    } else {
+        Serial.println("[Mode→Offline] Idle, relay tetap OFF");
     }
 }
 
@@ -174,37 +185,69 @@ void doSessionRecovery() {
     float recoveredEnergyWh = 0, recoveredKwh = 0, recoveredCost = 0;
     char  recoveredName[32] = "";
     unsigned long recoveredStartTs = 0;
+    unsigned long recoveredElapsedSec = 0;
 
     if (!fsReadSession(recoveredEnergyWh, recoveredKwh, recoveredCost,
-                       recoveredName, recoveredStartTs)) return;
+                       recoveredName, recoveredStartTs, recoveredElapsedSec)) return;
 
     Serial.printf("[Recovery] Ditemukan: '%s' %.4f kWh\n", recoveredName, recoveredKwh);
     oledStatus("Recovery sesi", recoveredName);
     delay(1500);
 
     unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-    String dur = buildDuration(recoveredStartTs, nowTs);
-
-    if (wifiConnected) {
-        bool pushed = pushHistoryToFirebase(
-            recoveredName, dur.c_str(),
-            0.0f, recoveredKwh, recoveredCost,
-            nowTs, true, false);
-        if (pushed) Serial.println("[Recovery] Push Firebase OK");
-        else {
-            Serial.println("[Recovery] Push gagal — antri offline");
-            fsAppendOfflineHistory(recoveredName, recoveredStartTs, nowTs,
-                                   recoveredKwh, recoveredCost, 0.0f, false);
-        }
-    } else {
-        fsAppendOfflineHistory(recoveredName, recoveredStartTs, nowTs,
-                               recoveredKwh, recoveredCost, 0.0f, false);
-        Serial.println("[Recovery] Simpan ke offline history");
+    if ((recoveredStartTs == 0 || recoveredStartTs > nowTs) && recoveredElapsedSec > 0) {
+        recoveredStartTs = nowTs > recoveredElapsedSec ? nowTs - recoveredElapsedSec : nowTs;
     }
 
-    fsClearSession();
-    oledStatus("Recovery selesai", wifiConnected ? "Tersimpan ✓" : "Antri sync");
+    strlcpy(sessionDeviceName, recoveredName, sizeof(sessionDeviceName));
+    sessionStartTs      = recoveredStartTs;
+    sessionEnergyWh     = recoveredEnergyWh;
+    sessionKwh          = recoveredKwh;
+    sessionCost         = recoveredCost;
+    hadDataOnce         = true;
+    disconnectCount     = 0;
+    isOverload          = false;
+    overloadAlertLinger = false;
+    recoveredSessionPending = true;
+    recoveredNoDeviceCount  = 0;
+
+    setRelay(true, "resume recovered session");
+    fsWriteSession();
+
+    oledStatus("Recovery lanjut", recoveredName);
     delay(1000);
+}
+
+void handleRecoveredSessionCheck() {
+    if (!recoveredSessionPending || !relayOn || !sessionActive) return;
+
+    if (deviceConnected) {
+        recoveredSessionPending = false;
+        recoveredNoDeviceCount = 0;
+        prevDevConn = true;
+        Serial.println("[Recovery] Device masih terhubung, sesi dilanjutkan");
+        return;
+    }
+
+    recoveredNoDeviceCount++;
+    Serial.printf("[Recovery] Menunggu device setelah boot %d/%d\n",
+                  recoveredNoDeviceCount, DISCONNECT_THRESHOLD);
+
+    if (recoveredNoDeviceCount < DISCONNECT_THRESHOLD) return;
+
+    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+    Serial.println("[Recovery] Device tidak ada, arsipkan checkpoint terakhir");
+    archiveCurrentSession(nowTs, lastP, true, false);
+    if (wifiConnected) {
+        sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, false, nowTs);
+    }
+
+    setRelay(false, "recovered device missing");
+    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
+    hadDataOnce = false; prevDevConn = false;
+    sessionDeviceName[0] = '\0';
+    currentSessionId[0] = '\0';
+    saveSessionId();
 }
 
 // ================================================================
@@ -218,33 +261,16 @@ void handleDeviceDisconnect() {
         if (disconnectCount >= DISCONNECT_THRESHOLD) {
             Serial.println("[Disconnect] ✓ Device dicabut — simpan sesi, relay OFF");
             unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-            String dur = buildDuration(sessionStartTs, nowTs);
-
+            archiveCurrentSession(nowTs, lastP, false, false);
             if (wifiConnected) {
-                bool ok = pushHistoryToFirebase(sessionDeviceName, dur.c_str(),
-                                               lastP, sessionKwh, sessionCost,
-                                               nowTs, false, false);
-                sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, true, nowTs);
-                Serial.printf("[Disconnect] History push: %s\n", ok ? "OK" : "FAIL");
-                if (!ok) {
-                    fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                                          sessionKwh, sessionCost, lastP, false);
-                }
-            } else {
-                fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                                      sessionKwh, sessionCost, lastP, false);
-                Serial.println("[Disconnect] History antri offline");
+                sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, false, nowTs);
             }
 
-            bool wasOffline = modeOffline;
             setRelay(false, "device dicabut");
             sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
             hadDataOnce = false; sessionDeviceName[0] = '\0';
-
-            if (wasOffline) {
-                delay(500);
-                startOfflineSession("offline auto-restart");
-            }
+            currentSessionId[0] = '\0';
+            saveSessionId();
         }
     } else if (deviceConnected) {
         disconnectCount = 0;
@@ -261,38 +287,21 @@ void handleOverload(float power) {
         Serial.printf("[Overload] ⚠ %.1fW >= %.0fW — relay OFF\n", power, overloadThreshold);
 
         unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-        String dur = buildDuration(sessionStartTs, nowTs);
-
-        if (wifiConnected) {
-            bool ok = pushHistoryToFirebase(sessionDeviceName, dur.c_str(),
-                                           power, sessionKwh, sessionCost,
-                                           nowTs, false, true);
-            Serial.printf("[Overload] History push: %s\n", ok ? "OK" : "FAIL");
-            if (!ok) {
-                fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                                      sessionKwh, sessionCost, power, true);
-            }
-        } else {
-            fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                                  sessionKwh, sessionCost, power, true);
-        }
+        archiveCurrentSession(nowTs, power, false, true);
 
         setRelay(false, "overload");
         overloadAlertLinger = true;
         overloadLingerStart = millis();
         sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
         sessionDeviceName[0] = '\0';
+        currentSessionId[0] = '\0';
+        saveSessionId();
 
     } else if (!newOvl && isOverload) {
         isOverload = false;
         Serial.println("[Overload] ✓ Teratasi");
 
-        // Di offline mode, auto-start sesi baru setelah overload teratasi
-        // (jika linger sudah selesai — dicek di display.cpp handleOverloadAlert)
-        if (modeOffline && !relayOn && !overloadAlertLinger) {
-            delay(500);
-            startOfflineSession("offline post-overload");
-        }
+        // Tetap idle setelah overload; user bisa mulai sesi baru manual.
     }
 }
 

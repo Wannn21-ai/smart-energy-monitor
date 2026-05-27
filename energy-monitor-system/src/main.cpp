@@ -92,11 +92,12 @@ void setup() {
         fsSyncOfflineHistoryToFirebase();
 
         unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-        sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, false, false, ts);
+        sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost,
+                       false, false, relayOn, ts);
 
-        oledStatus("Online Ready ✓", "Waiting for web...");
+        oledStatus("Online Ready ✓", relayOn ? sessionDeviceName : "Waiting for web...");
         delay(1000);
-        Serial.println("[Boot-Online] Relay OFF — menunggu command web");
+        Serial.printf("[Boot-Online] Relay %s\n", relayOn ? "ON (recovered)" : "OFF");
 
     } else {
         // ★ OFFLINE MODE
@@ -107,19 +108,10 @@ void setup() {
 
         doSessionRecovery();
 
-        // Relay ON otomatis
-        generateOfflineDeviceName();
-        unsigned long nowTs = millis() / 1000;
-        sessionStartTs  = nowTs;
-        sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
-        hadDataOnce     = false; disconnectCount = 0;
-        isOverload      = false; overloadAlertLinger = false;
-        setRelay(true, "offline boot auto-start");
-
         lastReconnectMs = millis();
-        oledStatus("Offline Mode ✓", sessionDeviceName);
+        oledStatus("Offline Mode ✓", relayOn ? sessionDeviceName : "Idle");
         delay(1500);
-        Serial.printf("[Boot-Offline] Relay ON — device: %s\n", sessionDeviceName);
+        Serial.printf("[Boot-Offline] Relay %s\n", relayOn ? "ON (recovered)" : "OFF");
     }
 
     // Init timers
@@ -229,7 +221,8 @@ void loop() {
         lastPF = pf; lastHz = frequency; hadDataOnce = true;
     }
 
-    // Disconnect & overload
+    // Recovery, disconnect & overload
+    handleRecoveredSessionCheck();
     handleDeviceDisconnect();
     handleOverload(power);
 

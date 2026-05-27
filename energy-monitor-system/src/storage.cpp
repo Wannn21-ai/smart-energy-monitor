@@ -65,9 +65,12 @@ bool fsInit() {
 bool fsWriteSession() {
     if (!sessionActive || strlen(sessionDeviceName) == 0) return false;
 
-    StaticJsonDocument<256> doc;
+    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+
+    StaticJsonDocument<384> doc;
     doc["name"]      = sessionDeviceName;
     doc["start"]     = sessionStartTs;
+    doc["elapsed"]   = getSessionElapsedSec(nowTs);
     doc["energy_wh"] = sessionEnergyWh;
     doc["kwh"]       = sessionKwh;
     doc["cost"]      = sessionCost;
@@ -104,7 +107,8 @@ void fsClearSession() {
 // SESSION FILE — read
 // ================================================================
 bool fsReadSession(float &outEnergyWh, float &outKwh, float &outCost,
-                   char *outName, unsigned long &outStartTs) {
+                   char *outName, unsigned long &outStartTs,
+                   unsigned long &outElapsedSec) {
     if (!LittleFS.exists(FS_SESSION_PATH)) return false;
 
     File f = LittleFS.open(FS_SESSION_PATH, "r");
@@ -124,6 +128,7 @@ bool fsReadSession(float &outEnergyWh, float &outKwh, float &outCost,
     outKwh      = doc["kwh"]       | 0.0f;
     outCost     = doc["cost"]      | 0.0f;
     outStartTs  = doc["start"]     | (unsigned long)0;
+    outElapsedSec = doc["elapsed"] | (unsigned long)0;
     strlcpy(outName, doc["name"] | "Recovered", 32);
 
     const char* savedUid  = doc["uid"]       | "";
@@ -171,6 +176,8 @@ void fsAppendOfflineHistory(const char* name, unsigned long startTs,
     entry["cost"]     = cost;
     entry["power"]    = avgPower;
     entry["overload"] = wasOverload;
+    entry["uid"]      = currentUid;
+    entry["sessionId"] = currentSessionId;
 
     File f = LittleFS.open(FS_HISTORY_PATH, "w");
     if (!f) { Serial.println("[FS] Gagal tulis offline history"); return; }
@@ -216,6 +223,11 @@ bool fsSyncOfflineHistoryToFirebase() {
         float         cost    = entry["cost"]     | 0.0f;
         float         avgPwr  = entry["power"]    | 0.0f;
         bool          wasOvl  = entry["overload"] | false;
+        const char*   uid     = entry["uid"]      | "";
+        const char*   sessId  = entry["sessionId"] | "";
+
+        if (strlen(uid) > 0) strlcpy(currentUid, uid, sizeof(currentUid));
+        if (strlen(sessId) > 0) strlcpy(currentSessionId, sessId, sizeof(currentSessionId));
 
         String dur = buildDuration(startTs, endTs);
         bool ok = pushHistoryToFirebase(name, dur.c_str(), avgPwr, kwh, cost,

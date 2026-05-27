@@ -34,6 +34,8 @@ extern bool  sessionActive;
 extern char  sessionDeviceName[32];
 extern unsigned long sessionStartTs;
 extern int   offlineDeviceCounter;
+extern bool  recoveredSessionPending;
+extern int   recoveredNoDeviceCount;
 
 // ── Last sensor readings ─────────────────────────────────────────
 extern float lastV;
