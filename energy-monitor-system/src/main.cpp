@@ -239,6 +239,9 @@ void loop() {
         fsWriteSession();
     }
 
+    unsigned long stateTs = ntpSynced ? (unsigned long)time(nullptr) : now / 1000;
+    syncSessionDataFromLegacy(stateTs);
+
     prevDevConn = deviceConnected;
 
     // Serial log

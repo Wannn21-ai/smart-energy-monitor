@@ -6,6 +6,20 @@
 #include "state.h"
 #include "config.h"
 
+SessionData sessionData = {
+    0.0f,
+    0.0f,
+    0.0f,
+    0.0f,
+    0.0f,
+    0,
+    false,
+    "",
+    SESSION_MODE_ONLINE,
+    false,
+    SESSION_END_NONE
+};
+
 // ── Mode ─────────────────────────────────────────────────────────
 bool wifiConnected = false;
 bool ntpSynced     = false;
@@ -55,3 +69,18 @@ unsigned long lastBlinkMs             = 0;
 bool          blinkState              = false;
 unsigned long lastOverloadBlinkMs     = 0;
 bool          overloadBlinkState      = false;
+
+void syncSessionDataFromLegacy(unsigned long nowTs) {
+    sessionData.voltage = lastV;
+    sessionData.current = lastI;
+    sessionData.power = lastP;
+    sessionData.energy = sessionKwh;
+    sessionData.cost = sessionCost;
+    sessionData.duration = (sessionActive && sessionStartTs > 0 && nowTs > sessionStartTs)
+        ? nowTs - sessionStartTs
+        : 0;
+    sessionData.sessionActive = sessionActive;
+    strlcpy(sessionData.deviceName, sessionDeviceName, sizeof(sessionData.deviceName));
+    sessionData.mode = modeOffline ? SESSION_MODE_OFFLINE : SESSION_MODE_ONLINE;
+    sessionData.overload = isOverload;
+}

@@ -63,17 +63,18 @@ bool fsInit() {
 // SESSION FILE — write checkpoint
 // ================================================================
 bool fsWriteSession() {
-    if (!sessionActive || strlen(sessionDeviceName) == 0) return false;
-
     unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+    syncSessionDataFromLegacy(nowTs);
+
+    if (!sessionData.sessionActive || strlen(sessionData.deviceName) == 0) return false;
 
     StaticJsonDocument<384> doc;
-    doc["name"]      = sessionDeviceName;
+    doc["name"]      = sessionData.deviceName;
     doc["start"]     = sessionStartTs;
-    doc["elapsed"]   = getSessionElapsedSec(nowTs);
-    doc["energy_wh"] = sessionEnergyWh;
-    doc["kwh"]       = sessionKwh;
-    doc["cost"]      = sessionCost;
+    doc["elapsed"]   = sessionData.duration;
+    doc["energy_wh"] = sessionData.energy * 1000.0f;
+    doc["kwh"]       = sessionData.energy;
+    doc["cost"]      = sessionData.cost;
     doc["relay"]     = relayOn;
     doc["uid"]       = currentUid;
     doc["sessionId"] = currentSessionId;
@@ -89,7 +90,7 @@ bool fsWriteSession() {
         Serial.println("[FS] ✗ Gagal serialize session");
         return false;
     }
-    Serial.printf("[FS] ✓ Checkpoint: %s %.4f kWh\n", sessionDeviceName, sessionKwh);
+    Serial.printf("[FS] ✓ Checkpoint: %s %.4f kWh\n", sessionData.deviceName, sessionData.energy);
     return true;
 }
 

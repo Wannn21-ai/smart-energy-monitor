@@ -8,6 +8,36 @@
 
 #include <Arduino.h>
 
+enum SessionMode {
+    SESSION_MODE_ONLINE,
+    SESSION_MODE_OFFLINE
+};
+
+enum SessionEndReason {
+    SESSION_END_NONE,
+    SESSION_END_USER_STOP,
+    SESSION_END_DEVICE_DISCONNECT,
+    SESSION_END_OVERLOAD,
+    SESSION_END_RECOVERY_MISSING_DEVICE
+};
+
+struct SessionData {
+    float voltage;
+    float current;
+    float power;
+    float energy;
+    float cost;
+    unsigned long duration;
+    bool sessionActive;
+    char deviceName[32];
+    SessionMode mode;
+    bool overload;
+    SessionEndReason endReason;
+};
+
+extern SessionData sessionData;
+void syncSessionDataFromLegacy(unsigned long nowTs);
+
 // ── Mode ─────────────────────────────────────────────────────────
 extern bool wifiConnected;
 extern bool ntpSynced;
