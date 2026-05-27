@@ -20,16 +20,28 @@ DNSServer dnsServer;
 // ================================================================
 // WiFi CONNECT
 // ================================================================
+// Di network.cpp, ganti implementasi tryConnectWiFi
 bool tryConnectWiFi(int sec) {
     WiFi.begin();
     Serial.print("[WiFi] Connecting");
     bool blink = false;
-    for (int i = 0; i < sec * 2 && WiFi.status() != WL_CONNECTED; i++) {
-        delay(500);
-        Serial.print(".");
-        blink = !blink;
-        digitalWrite(PIN_LED_BLUE, blink);
+    unsigned long start = millis();
+    unsigned long timeout = (unsigned long)sec * 1000UL;
+    
+    while (millis() - start < timeout && WiFi.status() != WL_CONNECTED) {
+        // Tetap melayani DNS dan WebServer selama menunggu
+        dnsServer.processNextRequest();
+        localServer.handleClient();
+        
+        delay(100);
+        
+        // Blink setiap 500ms
+        if ((millis() - start) % 500 < 100) {
+            blink = !blink;
+            digitalWrite(PIN_LED_BLUE, blink);
+        }
     }
+    
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\n[WiFi] OK: " + WiFi.localIP().toString());
         digitalWrite(PIN_LED_BLUE, HIGH);
@@ -38,7 +50,6 @@ bool tryConnectWiFi(int sec) {
     Serial.println("\n[WiFi] Gagal");
     return false;
 }
-
 // ================================================================
 // NTP SYNC
 // ================================================================
@@ -74,19 +85,35 @@ void networkHandleClients() {
 // WEBSERVER HANDLERS
 // ================================================================
 static void handleRoot() {
-    int n = WiFi.scanNetworks();
+   int n = WiFi.scanComplete();
+    
     String ssidOptions = "";
-    for (int i = 0; i < n; i++) {
-        String ssid = WiFi.SSID(i);
-        int rssi    = WiFi.RSSI(i);
-        bool locked = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-        int bars = rssi > -50 ? 4 : rssi > -65 ? 3 : rssi > -75 ? 2 : 1;
-        String bar = bars == 4 ? "████" : bars == 3 ? "███░" : bars == 2 ? "██░░" : "█░░░";
-        ssidOptions += "<option value='" + ssid + "'>"
-                    + bar + " " + ssid + (locked ? " 🔒" : "") + "</option>";
-    }
-    if (n == 0) ssidOptions = "<option value=''>Tidak ada jaringan ditemukan</option>";
+    String scanStatus  = "";
+    
+    if (n == WIFI_SCAN_RUNNING) {
+        ssidOptions = "<option value=''>⏳ Sedang scan... refresh sebentar lagi</option>";
+        scanStatus  = "<div style='color:#ffab00;font-size:12px;margin-bottom:8px;'>"
+                      "⏳ Scan berjalan — <a href='/' style='color:#00e5ff;'>Refresh</a></div>";
+    } else if (n <= 0) {
+        WiFi.scanNetworks(true);  // async scan, results will be available on next page load
+        ssidOptions = "<option value=''>Tidak ada jaringan — <a href='/'>Refresh</a></option>";
+        scanStatus  = "<div style='color:#ff1744;font-size:12px;margin-bottom:8px;'>"
+                      "Tidak ada jaringan ditemukan. "
+                      "<a href='/' style='color:#00e5ff;'>Scan ulang</a></div>";
+    } else {
 
+        for (int i = 0; i < n; i++) {
+            String ssid = WiFi.SSID(i);
+            int rssi    = WiFi.RSSI(i);
+            bool locked = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+            int bars = rssi > -50 ? 4 : rssi > -65 ? 3 : rssi > -75 ? 2 : 1;
+            String bar = bars == 4 ? "████" : bars == 3 ? "███░" : bars == 2 ? "██░░" : "█░░░";
+            ssidOptions += "<option value='" + ssid + "'>"
+                        + bar + " " + ssid + (locked ? " 🔒" : "") + "</option>";
+        }
+
+    if (n == 0) ssidOptions = "<option value=''>Tidak ada jaringan ditemukan</option>";
+    }
     int pendingSync = fsCountOfflineHistory();
     String syncInfo = "";
     if (pendingSync > 0) {
@@ -121,11 +148,19 @@ static void handleRoot() {
         "<div class='card'><b style='color:#888;font-size:11px;text-transform:uppercase;"
         "letter-spacing:.1em'>Koneksi WiFi</b>"
         + syncInfo +
-        "<label>Pilih Jaringan</label>"
-        "<select id='ssid'>" + ssidOptions + "</select>"
-        "<label>Password</label>"
-        "<input type='password' id='wpass' placeholder='••••••••'/>"
-        "<button class='btn btn-p' onclick='connect()'>Hubungkan</button></div>"
+   // Di dalam handleRoot(), bagian HTML — ganti bagian form WiFi
+String wifiForm = 
+    "<label>Pilih Jaringan</label>"
+    "<select id='ssid' onchange=\"document.getElementById('ssid_manual').value=this.value\">"
+    + ssidOptions +
+    "</select>"
+    "<label>Atau ketik SSID manual</label>"
+    "<input type='text' id='ssid_manual' placeholder='Ketik nama WiFi...' "
+    "style='margin-bottom:4px;'/>"
+    "<label>Password</label>"
+    "<input type='password' id='wpass' placeholder='••••••••'/>"
+    "<button class='btn btn-p' onclick='connect()'>Hubungkan</button>"
+    "<button class='btn btn-g' onclick='rescan()'>🔄 Scan Ulang</button>";
         "<div class='card'><b style='color:#888;font-size:11px;text-transform:uppercase;"
         "letter-spacing:.1em'>Pengaturan</b>"
         "<label>Tarif / kWh (IDR)</label>"
@@ -140,14 +175,28 @@ var _tt;
 function toast(msg,type){var el=document.getElementById('toast');
 el.textContent=msg;el.className=type||'';el.classList.add('show');
 clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove('show');},4000);}
-function connect(){var ssid=document.getElementById('ssid').value;
-var pass=document.getElementById('wpass').value;
-if(!ssid){toast('Pilih jaringan WiFi','err');return;}
-toast('Menghubungkan ke "'+ssid+'"...','info');
-fetch('/connectwifi?ssid='+encodeURIComponent(ssid)+'&pass='+encodeURIComponent(pass))
-.then(function(r){return r.text();})
-.then(function(t){if(t.indexOf('Berhasil')>=0)toast('✓ '+t,'ok');
-else toast('✗ '+t,'err');}).catch(function(){toast('Timeout — coba lagi','err');});}
+function connect() {
+    // Prioritas: input manual jika diisi, fallback ke dropdown
+    var ssid = document.getElementById('ssid_manual').value.trim() 
+               || document.getElementById('ssid').value;
+    var pass = document.getElementById('wpass').value;
+    if (!ssid) { toast('Pilih atau ketik nama jaringan WiFi', 'err'); return; }
+    toast('Menghubungkan ke "' + ssid + '"...', 'info');
+    fetch('/connectwifi?ssid=' + encodeURIComponent(ssid) 
+          + '&pass=' + encodeURIComponent(pass))
+        .then(function(r) { return r.text(); })
+        .then(function(t) {
+            if (t.indexOf('Berhasil') >= 0) toast('✓ ' + t, 'ok');
+            else toast('✗ ' + t, 'err');
+        }).catch(function() { toast('Timeout — coba lagi', 'err'); });
+}
+
+function rescan() {
+    toast('Scanning...', 'info');
+    fetch('/rescan').then(function() {
+        setTimeout(function() { window.location.reload(); }, 3000);
+    });
+}
 function save(){var thr=parseFloat(document.getElementById('thr').value);
 var trf=parseFloat(document.getElementById('trf').value);
 if(isNaN(thr)||thr<100||thr>10000){toast('Threshold 100–10000 W','err');return;}
@@ -256,6 +305,12 @@ static void handleCaptivePortal() {
 // SETUP WEBSERVER
 // ================================================================
 void setupWebServer() {
+
+    localServer.on(".rescan", HTTP_GET, []() {
+        WiFi.scanDelete();
+        WiFi.scanNetworks(true);
+        localServer.send(200, "text/plain", "Scanning...");
+    });
     localServer.on("/",            HTTP_GET, handleRoot);
     localServer.on("/index.html",  HTTP_GET, handleRoot);
     localServer.on("/save",        HTTP_GET, handleSave);
