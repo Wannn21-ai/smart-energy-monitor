@@ -7,9 +7,11 @@
 #include "config.h"
 #include "state.h"
 #include "firebase.h"   // fsSyncOfflineHistoryToFirebase butuh pushHistoryToFirebase
+#include "session.h"    // fsWriteSession butuh sessionEnergyWh, sessionKwh, sessionCost
 
 #include <Preferences.h>
 #include <LittleFS.h>
+#include <WiFi.h>
 #include <ArduinoJson.h>
 #include <time.h>
 

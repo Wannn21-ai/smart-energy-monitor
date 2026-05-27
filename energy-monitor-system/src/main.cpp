@@ -22,6 +22,7 @@
 #include "network.h"
 
 #include <WiFi.h>
+#include <LittleFS.h>
 #include <PZEM004Tv30.h>
 
 // ── Hardware objects (hanya didefinisikan di sini) ───────────────

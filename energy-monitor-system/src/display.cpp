@@ -8,6 +8,7 @@
 #include "state.h"
 
 #include <Wire.h>
+#include <WiFi.h>
 #include <Adafruit_GFX.h>
 
 #define SCREEN_WIDTH  128
