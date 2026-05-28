@@ -13,6 +13,20 @@ enum SessionMode {
     SESSION_MODE_OFFLINE
 };
 
+enum class SystemMode {
+    ONLINE,
+    OFFLINE,
+    TRANSITION
+};
+
+enum class SessionState {
+    IDLE,
+    WAITING_LOAD,
+    MONITORING,
+    OVERLOAD,
+    FINISHED
+};
+
 enum SessionEndReason {
     SESSION_END_NONE,
     SESSION_END_USER_STOP,
@@ -36,6 +50,14 @@ struct SessionData {
 };
 
 extern SessionData sessionData;
+extern SystemMode systemMode;
+extern SessionState sessionState;
+
+const char* systemModeToString(SystemMode mode);
+const char* sessionStateToString(SessionState state);
+void setSystemMode(SystemMode next, const char* reason = "");
+void setSessionState(SessionState next, const char* reason = "");
+void syncStateMachineFromLegacy();
 void syncSessionDataFromLegacy(unsigned long nowTs);
 
 // ── Mode ─────────────────────────────────────────────────────────

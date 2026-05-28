@@ -46,6 +46,7 @@ void setup() {
     digitalWrite(PIN_LED_RED,  LOW); digitalWrite(PIN_BUZZER,    LOW);
     digitalWrite(PIN_RELAY, RELAY_OFF);
     relayOn = false;
+    setSessionState(SessionState::IDLE, "boot");
 
     pzemSerial.begin(9600, SERIAL_8N1, 16, 17);
 
@@ -82,6 +83,7 @@ void setup() {
         // ★ ONLINE MODE
         Serial.println("[Boot] ★ ONLINE MODE");
         modeOffline = false;
+        setSystemMode(SystemMode::ONLINE, "boot wifi connected");
         WiFi.setSleep(false);
         oledStatus("WiFi OK ✓", "Sync NTP...");
         ntpSynced = tryNTPSync();
@@ -105,6 +107,7 @@ void setup() {
         modeOffline    = true;
         offlineStartMs = millis();
         lastModeTransitionMs = millis();
+        setSystemMode(SystemMode::OFFLINE, "boot wifi unavailable");
 
         doSessionRecovery();
 
@@ -225,6 +228,7 @@ void loop() {
     handleRecoveredSessionCheck();
     handleDeviceDisconnect();
     handleOverload(power);
+    syncStateMachineFromLegacy();
 
     // Energy accumulation
     if (deviceConnected && relayOn && !isOverload) {

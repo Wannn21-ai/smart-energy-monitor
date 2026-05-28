@@ -333,6 +333,8 @@ static void handleStatus() {
     String json = "{\"wifi\":" + String(wifiConnected ? "true" : "false") +
                   ",\"ip\":\"" + ip + "\"" +
                   ",\"mode\":\"" + String(modeOffline ? "offline" : "online") + "\"" +
+                  ",\"systemMode\":\"" + String(systemModeToString(systemMode)) + "\"" +
+                  ",\"sessionState\":\"" + String(sessionStateToString(sessionState)) + "\"" +
                   ",\"threshold\":" + String(overloadThreshold, 0) +
                   ",\"tarif\":" + String(tarif, 2) +
                   ",\"pendingSync\":" + String(pending) + "}";

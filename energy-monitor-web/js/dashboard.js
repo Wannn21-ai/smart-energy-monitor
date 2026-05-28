@@ -45,6 +45,18 @@ setInterval(async () => {
 
 // ================= CONSTANTS =================
 const STALE_THRESHOLD = 15;
+const SystemMode = Object.freeze({
+  ONLINE: "ONLINE",
+  OFFLINE: "OFFLINE",
+  TRANSITION: "TRANSITION"
+});
+const SessionState = Object.freeze({
+  IDLE: "IDLE",
+  WAITING_LOAD: "WAITING_LOAD",
+  MONITORING: "MONITORING",
+  OVERLOAD: "OVERLOAD",
+  FINISHED: "FINISHED"
+});
 
 // ================= STATE — FIREBASE DATA =================
 let voltage = 0, current = 0, firebasePower = 0, firebaseTimestamp = 0;
@@ -58,10 +70,14 @@ let firebaseSessionStartTs = 0;
 let firebaseElapsedSec = 0;
 let firebaseSessionId = "";
 let firebaseSessionUid = "";
+let firebaseSystemMode = null;
+let firebaseSessionState = null;
 let systemInternet   = false;
 let deviceNameFromEsp = "—";  // Device name dari ESP32 (untuk offline mode)
 
 // ================= STATE — WEB =================
+let systemMode = SystemMode.OFFLINE;
+let sessionState = SessionState.IDLE;
 let systemOnline = false;
 let deviceOnline = false;
 let prevDeviceConnected = false;
@@ -410,6 +426,24 @@ function getSessionEnergy() {
 function getSessionCost() {
   return getSessionEnergy() * settings.tariff;
 }
+function enumValue(enumMap, value) {
+  return Object.values(enumMap).includes(value) ? value : null;
+}
+function deriveSystemMode() {
+  if (!systemOnline) return SystemMode.OFFLINE;
+  const fromEsp = enumValue(SystemMode, firebaseSystemMode);
+  if (fromEsp) return fromEsp;
+  return firebaseOffline ? SystemMode.OFFLINE : SystemMode.ONLINE;
+}
+function deriveSessionState(webOverload) {
+  const fromEsp = enumValue(SessionState, firebaseSessionState);
+  if (fromEsp) return fromEsp;
+  if (webOverload || firebaseOverload) return SessionState.OVERLOAD;
+  if (waitingForName || (firebaseRelay && !deviceOnline)) return SessionState.WAITING_LOAD;
+  if ((isRunning || firebaseSessionActive) && deviceOnline) return SessionState.MONITORING;
+  if (activeDevice && !firebaseRelay && !firebaseSessionActive) return SessionState.FINISHED;
+  return SessionState.IDLE;
+}
 
 function generateUniqueName(base, usedNames) {
   if (!usedNames.includes(base)) return base;
@@ -532,6 +566,7 @@ async function resetMonitoring() {
   startTime       = null;
   isRunning       = false;
   sessionSaved    = false;
+  sessionState    = SessionState.IDLE;
   energyBaseline  = 0;
   activeDevice    = null;
   lastknownEnergy = 0;
@@ -563,6 +598,7 @@ async function startMonitoring(name) {
   lastknownEnergy = energyBaseline;
   isRunning       = true;
   sessionSaved    = false;
+  sessionState    = SessionState.MONITORING;
   offlineSessionStartEnergy = null;
   pendingSessionId = null;
 
@@ -713,9 +749,11 @@ btnSaveDev.addEventListener("click", async () => {
   } else {
     // Manual FAB path: turn relay ON first, wait for device detection
     // pendingDeviceName is read in updateMeters when device comes online
+    // State migration point: IDLE -> WAITING_LOAD until ESP32 reports load.
     showToast(`Menyalakan relay untuk "${name}"...`, "");
     pendingDeviceName = name;
     pendingSessionId = makeId("sess");
+    sessionState = SessionState.WAITING_LOAD;
     await sendRelayCommand("START", {
       sessionId: pendingSessionId,
       deviceName: name,
@@ -748,6 +786,8 @@ if (btnStop) {
       showToast("Tidak ada sesi yang berjalan", "error"); return;
     }
     await saveSession();
+    // State migration point: MONITORING -> FINISHED; ESP32 keeps the source of truth.
+    sessionState = SessionState.FINISHED;
     await sendRelayCommand("STOP", {
       sessionId: activeDevice.id,
       reason: "USER_STOP",
@@ -773,6 +813,8 @@ onValue(ref(db, "live"), snapshot => {
   firebaseElapsedSec = sys.elapsedSec || 0;
   firebaseSessionId = sys.sessionId || "";
   firebaseSessionUid = sys.uid || "";
+  firebaseSystemMode = sys.systemMode || null;
+  firebaseSessionState = sys.sessionState || null;
   deviceNameFromEsp = sys.deviceName || "Device";  // Ambil nama device dari ESP32
 
   const dev = data.device || {};
@@ -807,6 +849,8 @@ async function updateMeters() {
   deviceOnline = systemOnline && current > 0.01 && firebasePower > 0.5;
 
   const webOverload = deviceOnline && firebasePower >= settings.overloadThreshold;
+  systemMode = deriveSystemMode();
+  sessionState = deriveSessionState(webOverload);
 
   // ── Offline banner ──────────────────────────────────────
   if (!systemOnline && firebaseTimestamp > 0) {
@@ -837,12 +881,12 @@ async function updateMeters() {
 
   // ── Offline session banner ──────────────────────────────
   // Tampilkan banner saat ESP32 dalam mode offline dengan relay ON
-  setOfflineSessionBanner(firebaseOffline && firebaseRelay && !systemOnline, deviceNameFromEsp);
+  setOfflineSessionBanner(systemMode === SystemMode.OFFLINE && firebaseRelay && !systemOnline, deviceNameFromEsp);
   
   // ── Mode status banner ────────────────────────────────
   // Tampilkan badge mode offline dengan jumlah sesi pending sync
   // TODO: Get pending count dari API atau Firebase
-  updateModeStatusBanner(!systemOnline, firebaseRelay, 0);
+  updateModeStatusBanner(systemMode !== SystemMode.ONLINE, firebaseRelay, 0);
 
   // ── Update status bar ──────────────────────────────────
   setSystemStatus(systemOnline);
@@ -887,6 +931,7 @@ async function updateMeters() {
 
   // ── Device baru terdeteksi ─────────────────────────────
   if (!prevDeviceConnected && deviceOnline) {
+    // State migration point: WAITING_LOAD -> MONITORING.
     deviceConnectTime   = Date.now();
     deviceConnectEnergy = firebaseEnergy;
     lastknownEnergy     = firebaseEnergy;
@@ -939,6 +984,7 @@ async function updateMeters() {
 
   // ── Overload ───────────────────────────────────────────
   if (webOverload && !prevOverload) {
+    // State migration point: MONITORING -> OVERLOAD.
     if (settings.notifOverload)
       showToast(`⚠ OVERLOAD! ${firebasePower.toFixed(0)}W ≥ ${settings.overloadThreshold}W`, "error");
     setDeviceBadge("overload");

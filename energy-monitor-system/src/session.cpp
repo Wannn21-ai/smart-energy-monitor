@@ -49,9 +49,21 @@ String jsonEscape(const char* s) {
 // RELAY — single entry point, atomic state update
 // ================================================================
 void setRelay(bool on, const char* reason) {
+    bool wasActive = sessionActive;
     relayOn = on;
     digitalWrite(PIN_RELAY, on ? RELAY_ON : RELAY_OFF);
     sessionActive = on;
+
+    // State migration point: relay ON means waiting for measurable load,
+    // then the sensor loop promotes WAITING_LOAD to MONITORING.
+    if (on) {
+        setSessionState(SessionState::WAITING_LOAD, reason);
+    } else if (isOverload || overloadAlertLinger) {
+        setSessionState(SessionState::OVERLOAD, reason);
+    } else {
+        setSessionState(wasActive ? SessionState::FINISHED : SessionState::IDLE, reason);
+    }
+
     if (!on) {
         disconnectCount = 0;
         recoveredSessionPending = false;
@@ -95,6 +107,7 @@ void transitionToOnlineMode() {
     lastModeTransitionMs = now;
 
     Serial.println("[Mode] ▶ → ONLINE MODE");
+    setSystemMode(SystemMode::TRANSITION, "offline to online");
 
     if (sessionActive && hadDataOnce) {
         if (fsWriteSession()) {
@@ -105,6 +118,7 @@ void transitionToOnlineMode() {
     modeOffline   = false;
     wifiConnected = true;
     offlineStartMs = 0;
+    setSystemMode(SystemMode::ONLINE, "wifi restored");
 
     Serial.println("[Mode→Online] State set, akan sync history...");
     fsSyncOfflineHistoryToFirebase();
@@ -125,10 +139,12 @@ void transitionToOfflineMode(const char* reason) {
     lastModeTransitionMs = now;
 
     Serial.printf("[Mode] ▶ → OFFLINE MODE (%s)\n", reason ? reason : "?");
+    setSystemMode(SystemMode::TRANSITION, reason);
 
     modeOffline    = true;
     wifiConnected  = false;
     offlineStartMs = now;
+    setSystemMode(SystemMode::OFFLINE, reason);
 
     if (relayOn) {
         if (strlen(sessionDeviceName) == 0) generateOfflineDeviceName();
@@ -284,6 +300,7 @@ void handleOverload(float power) {
     bool newOvl = deviceConnected && (power >= overloadThreshold);
     if (newOvl && !isOverload) {
         isOverload = true;
+        setSessionState(SessionState::OVERLOAD, "power threshold exceeded");
         Serial.printf("[Overload] ⚠ %.1fW >= %.0fW — relay OFF\n", power, overloadThreshold);
 
         unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
@@ -299,6 +316,7 @@ void handleOverload(float power) {
 
     } else if (!newOvl && isOverload) {
         isOverload = false;
+        setSessionState(SessionState::IDLE, "overload cleared");
         Serial.println("[Overload] ✓ Teratasi");
 
         // Tetap idle setelah overload; user bisa mulai sesi baru manual.

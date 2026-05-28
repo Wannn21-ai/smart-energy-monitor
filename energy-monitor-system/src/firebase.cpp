@@ -22,6 +22,7 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
                     float kwh, float cost, bool dev, bool ovl,
                     bool relay, unsigned long ts) {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
+    syncStateMachineFromLegacy();
 
     WiFiClientSecure c; c.setInsecure(); c.setTimeout(10000);
     HTTPClient h;
@@ -29,6 +30,8 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
     h.addHeader("Content-Type", "application/json");
 
     unsigned long elapsedSec = getSessionElapsedSec(ts);
+    const char* systemModeStr = systemModeToString(systemMode);
+    const char* sessionStateStr = sessionStateToString(sessionState);
     const char* modeStr = modeOffline
         ? (relay ? "OFFLINE_MONITORING" : "OFFLINE_IDLE")
         : (relay ? "ONLINE_MONITORING"  : "ONLINE_IDLE");
@@ -47,6 +50,8 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
     j += ",\"sessionStartTs\":" + String(sessionStartTs);
     j += ",\"elapsedSec\":"    + String(elapsedSec);
     j += ",\"mode\":\"";        j += modeStr; j += "\"";
+    j += ",\"systemMode\":\"";  j += systemModeStr; j += "\"";
+    j += ",\"sessionState\":\""; j += sessionStateStr; j += "\"";
     j += ",\"uid\":\"";         j += jsonEscape(currentUid); j += "\"";
     j += ",\"sessionId\":\"";   j += jsonEscape(currentSessionId); j += "\"";
     j += ",\"deviceName\":\"";  j += jsonEscape(sessionDeviceName); j += "\"";
@@ -67,8 +72,9 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
 
     int statusCode = h.PUT(j);
     h.end();
-    Serial.printf("[FB] %d P=%.1fW E=%.4fkWh Dev=%s Mode=%s Pending=%d\n",
-                  statusCode, p, kwh, sessionDeviceName, modeStr, pendingSync);
+    Serial.printf("[FB] %d P=%.1fW E=%.4fkWh Dev=%s Mode=%s Session=%s Pending=%d\n",
+                  statusCode, p, kwh, sessionDeviceName,
+                  systemModeStr, sessionStateStr, pendingSync);
     return (statusCode == 200 || statusCode == 204);
 }
 

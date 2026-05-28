@@ -20,6 +20,9 @@ SessionData sessionData = {
     SESSION_END_NONE
 };
 
+SystemMode systemMode = SystemMode::ONLINE;
+SessionState sessionState = SessionState::IDLE;
+
 // ── Mode ─────────────────────────────────────────────────────────
 bool wifiConnected = false;
 bool ntpSynced     = false;
@@ -70,7 +73,60 @@ bool          blinkState              = false;
 unsigned long lastOverloadBlinkMs     = 0;
 bool          overloadBlinkState      = false;
 
+const char* systemModeToString(SystemMode mode) {
+    switch (mode) {
+        case SystemMode::ONLINE:     return "ONLINE";
+        case SystemMode::OFFLINE:    return "OFFLINE";
+        case SystemMode::TRANSITION: return "TRANSITION";
+    }
+    return "ONLINE";
+}
+
+const char* sessionStateToString(SessionState state) {
+    switch (state) {
+        case SessionState::IDLE:         return "IDLE";
+        case SessionState::WAITING_LOAD: return "WAITING_LOAD";
+        case SessionState::MONITORING:   return "MONITORING";
+        case SessionState::OVERLOAD:     return "OVERLOAD";
+        case SessionState::FINISHED:     return "FINISHED";
+    }
+    return "IDLE";
+}
+
+void setSystemMode(SystemMode next, const char* reason) {
+    if (systemMode == next) return;
+    Serial.printf("[State] SystemMode %s -> %s (%s)\n",
+                  systemModeToString(systemMode),
+                  systemModeToString(next),
+                  reason ? reason : "");
+    systemMode = next;
+}
+
+void setSessionState(SessionState next, const char* reason) {
+    if (sessionState == next) return;
+    Serial.printf("[State] SessionState %s -> %s (%s)\n",
+                  sessionStateToString(sessionState),
+                  sessionStateToString(next),
+                  reason ? reason : "");
+    sessionState = next;
+}
+
+void syncStateMachineFromLegacy() {
+    systemMode = modeOffline ? SystemMode::OFFLINE : SystemMode::ONLINE;
+
+    if (isOverload || overloadAlertLinger) {
+        sessionState = SessionState::OVERLOAD;
+    } else if (relayOn && sessionActive && deviceConnected) {
+        sessionState = SessionState::MONITORING;
+    } else if (relayOn && sessionActive) {
+        sessionState = SessionState::WAITING_LOAD;
+    } else if (sessionState != SessionState::FINISHED) {
+        sessionState = SessionState::IDLE;
+    }
+}
+
 void syncSessionDataFromLegacy(unsigned long nowTs) {
+    syncStateMachineFromLegacy();
     sessionData.voltage = lastV;
     sessionData.current = lastI;
     sessionData.power = lastP;
