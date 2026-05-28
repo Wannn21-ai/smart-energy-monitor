@@ -245,9 +245,8 @@ void pollCommandFromFirebase() {
         if (cmdThreshold > 0 && cmdThreshold != overloadThreshold) { overloadThreshold = cmdThreshold; prefsChanged = true; }
         if (prefsChanged) savePrefs();
 
-        unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-        sessionStartTs = nowTs;
-        setRelay(true, "web command START");
+        sessionStartTs = 0;
+        beginLoadCheck("web command START");
         clearFirebaseCommand();
         Serial.println("[Command] ✓ Relay ON (web)");
 

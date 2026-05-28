@@ -202,7 +202,8 @@ void loop() {
     }
 
     // ── Sensor loop setiap 5s ────────────────────────────────────
-    if (now - lastLoopMs < LOOP_INTERVAL) return;
+    unsigned long sensorInterval = loadCheckPending ? LOAD_CHECK_INTERVAL : LOOP_INTERVAL;
+    if (now - lastLoopMs < sensorInterval) return;
     float dT = (float)(now - lastLoopMs) / 3600000.0f;
     lastLoopMs = now;
 
@@ -218,20 +219,21 @@ void loop() {
     if (isnan(pf))        pf        = 0;
     if (isnan(frequency)) frequency = 0;
 
-    deviceConnected = (current > 0.01f && power > 0.5f);
+    deviceConnected = (current >= LOAD_MIN_CURRENT && power >= LOAD_MIN_POWER);
     if (deviceConnected) {
         lastV = voltage; lastI = current; lastP = power;
         lastPF = pf; lastHz = frequency; hadDataOnce = true;
     }
 
     // Recovery, disconnect & overload
+    handleLoadCheck(current, power);
     handleRecoveredSessionCheck();
     handleDeviceDisconnect();
     handleOverload(power);
     syncStateMachineFromLegacy();
 
     // Energy accumulation
-    if (deviceConnected && relayOn && !isOverload) {
+    if (sessionActive && deviceConnected && relayOn && !isOverload) {
         sessionEnergyWh += power * dT;
         sessionKwh       = sessionEnergyWh / 1000.0f;
         sessionCost      = sessionKwh * tarif;

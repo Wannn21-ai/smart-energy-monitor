@@ -43,6 +43,14 @@
 #define OFFLINE_SYNC_RETRY_INTERVAL 15000UL
 #define MODE_TRANSITION_DEBOUNCE   2000UL
 
+// Load validation after relay ON
+#define LOAD_SETTLE_MS             2000UL
+#define LOAD_CHECK_INTERVAL        1000UL
+#define LOAD_DETECT_TIMEOUT_MS     12000UL
+#define LOAD_DETECT_STABLE_SAMPLES 2
+#define LOAD_MIN_CURRENT           0.02f
+#define LOAD_MIN_POWER             1.0f
+
 // ── Button Hold Thresholds (ms) ──────────────────────────────────
 #define BTN_NEW_SESSION_HOLD 1000UL
 #define BTN_RESET_WIFI_HOLD  5000UL

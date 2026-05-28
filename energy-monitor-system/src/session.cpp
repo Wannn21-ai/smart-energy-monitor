@@ -52,7 +52,6 @@ void setRelay(bool on, const char* reason) {
     bool wasActive = sessionActive;
     relayOn = on;
     digitalWrite(PIN_RELAY, on ? RELAY_ON : RELAY_OFF);
-    sessionActive = on;
 
     // State migration point: relay ON means waiting for measurable load,
     // then the sensor loop promotes WAITING_LOAD to MONITORING.
@@ -65,6 +64,10 @@ void setRelay(bool on, const char* reason) {
     }
 
     if (!on) {
+        sessionActive = false;
+        loadCheckPending = false;
+        loadCheckStartedMs = 0;
+        loadDetectStableCount = 0;
         disconnectCount = 0;
         recoveredSessionPending = false;
         recoveredNoDeviceCount = 0;
@@ -74,8 +77,79 @@ void setRelay(bool on, const char* reason) {
 }
 
 // ================================================================
-// MODE TRANSITION → ONLINE
+// LOAD CHECK
 // ================================================================
+void beginLoadCheck(const char* reason) {
+    sessionActive = false;
+    loadCheckPending = true;
+    loadCheckStartedMs = millis();
+    loadDetectStableCount = 0;
+    deviceConnected = false;
+    prevDevConn = false;
+    setRelay(true, reason);
+    lastLoopMs = millis();
+    Serial.printf("[LoadCheck] Started, settle=%lums timeout=%lums\n",
+                  LOAD_SETTLE_MS, LOAD_DETECT_TIMEOUT_MS);
+}
+
+static void cancelLoadCheck(const char* reason) {
+    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+    Serial.printf("[LoadCheck] Cancelled: %s\n", reason ? reason : "no load");
+    setRelay(false, reason ? reason : "load check failed");
+    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
+    hadDataOnce = false; prevDevConn = false; deviceConnected = false;
+    sessionDeviceName[0] = '\0';
+    currentSessionId[0] = '\0';
+    saveSessionId();
+    if (wifiConnected) {
+        sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, false, false, nowTs);
+    }
+}
+
+void handleLoadCheck(float current, float power) {
+    if (!loadCheckPending) return;
+    if (!relayOn) {
+        loadCheckPending = false;
+        loadDetectStableCount = 0;
+        return;
+    }
+
+    unsigned long elapsed = millis() - loadCheckStartedMs;
+    if (elapsed < LOAD_SETTLE_MS) {
+        setSessionState(SessionState::WAITING_LOAD, "relay settling");
+        return;
+    }
+
+    bool loadDetected = current >= LOAD_MIN_CURRENT && power >= LOAD_MIN_POWER;
+    if (loadDetected) {
+        loadDetectStableCount++;
+    } else {
+        loadDetectStableCount = 0;
+    }
+
+    if (loadDetectStableCount >= LOAD_DETECT_STABLE_SAMPLES) {
+        unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+        loadCheckPending = false;
+        loadDetectStableCount = 0;
+        sessionActive = true;
+        sessionStartTs = nowTs;
+        hadDataOnce = true;
+        prevDevConn = true;
+        setSessionState(SessionState::MONITORING, "load verified");
+        fsWriteSession();
+        Serial.printf("[LoadCheck] Load verified I=%.2fA P=%.1fW\n", current, power);
+        return;
+    }
+
+    Serial.printf("[LoadCheck] Waiting load I=%.2fA P=%.1fW stable=%d/%d elapsed=%lums\n",
+                  current, power, loadDetectStableCount,
+                  LOAD_DETECT_STABLE_SAMPLES, elapsed);
+
+    if (elapsed >= LOAD_DETECT_TIMEOUT_MS) {
+        cancelLoadCheck("no load detected");
+    }
+}
+
 static void archiveCurrentSession(unsigned long nowTs, float power, bool recovered, bool wasOverload) {
     if (strlen(sessionDeviceName) == 0) strlcpy(sessionDeviceName, "Device", sizeof(sessionDeviceName));
     String dur = buildDuration(sessionStartTs, nowTs);
@@ -172,10 +246,9 @@ void startOfflineSession(const char* reason) {
     overloadAlertLinger = false;
     currentSessionId[0] = '\0';
 
-    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-    sessionStartTs = nowTs;
+    sessionStartTs = 0;
 
-    setRelay(true, reason);
+    beginLoadCheck(reason);
     Serial.printf("[Offline] New session: %s (%s)\n", sessionDeviceName, reason);
     oledStatus("Sesi Baru", sessionDeviceName);
     delay(1000);
@@ -228,6 +301,8 @@ void doSessionRecovery() {
     recoveredNoDeviceCount  = 0;
 
     setRelay(true, "resume recovered session");
+    sessionActive = true;
+    loadCheckPending = false;
     fsWriteSession();
 
     oledStatus("Recovery lanjut", recoveredName);
@@ -297,7 +372,7 @@ void handleDeviceDisconnect() {
 // HANDLE OVERLOAD
 // ================================================================
 void handleOverload(float power) {
-    bool newOvl = deviceConnected && (power >= overloadThreshold);
+    bool newOvl = relayOn && sessionActive && deviceConnected && (power >= overloadThreshold);
     if (newOvl && !isOverload) {
         isOverload = true;
         setSessionState(SessionState::OVERLOAD, "power threshold exceeded");

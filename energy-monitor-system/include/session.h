@@ -24,6 +24,8 @@ void doSessionRecovery();
 void handleRecoveredSessionCheck();
 
 // ── Device Disconnect & Overload ─────────────────────────────────
+void beginLoadCheck(const char* reason = "");
+void handleLoadCheck(float current, float power);
 void handleDeviceDisconnect();
 void handleOverload(float power);
 

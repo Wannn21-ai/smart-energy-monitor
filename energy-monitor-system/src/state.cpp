@@ -51,6 +51,9 @@ unsigned long sessionStartTs = 0;
 int   offlineDeviceCounter   = 0;
 bool  recoveredSessionPending = false;
 int   recoveredNoDeviceCount  = 0;
+bool  loadCheckPending        = false;
+unsigned long loadCheckStartedMs = 0;
+int   loadDetectStableCount   = 0;
 
 // ── Last sensor readings ─────────────────────────────────────────
 float lastV = 0, lastI = 0, lastP = 0, lastPF = 0, lastHz = 0;
@@ -118,7 +121,7 @@ void syncStateMachineFromLegacy() {
         sessionState = SessionState::OVERLOAD;
     } else if (relayOn && sessionActive && deviceConnected) {
         sessionState = SessionState::MONITORING;
-    } else if (relayOn && sessionActive) {
+    } else if (relayOn && (loadCheckPending || !deviceConnected)) {
         sessionState = SessionState::WAITING_LOAD;
     } else if (sessionState != SessionState::FINISHED) {
         sessionState = SessionState::IDLE;

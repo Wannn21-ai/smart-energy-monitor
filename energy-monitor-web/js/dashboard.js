@@ -45,6 +45,8 @@ setInterval(async () => {
 
 // ================= CONSTANTS =================
 const STALE_THRESHOLD = 15;
+const LOAD_MIN_CURRENT = 0.02;
+const LOAD_MIN_POWER = 1.0;
 const SystemMode = Object.freeze({
   ONLINE: "ONLINE",
   OFFLINE: "OFFLINE",
@@ -101,6 +103,8 @@ let offlineSessionStartEnergy = null;
 // could never read/write the same variable. Now shared correctly.
 let pendingDeviceName = null;
 let pendingSessionId = null;
+let pendingStartCommandAt = null;
+let pendingRelayConfirmed = false;
 
 // ================= STATE — OFFLINE TRACKING =================
 let offlineDetectedAt       = null;
@@ -573,6 +577,8 @@ async function resetMonitoring() {
   offlineSessionStartEnergy = null;
   pendingDeviceName = null;
   pendingSessionId = null;
+  pendingStartCommandAt = null;
+  pendingRelayConfirmed = false;
   await saveActiveSession(null);
   voltage = current = firebasePower = 0;
   clearDisplay();
@@ -601,6 +607,8 @@ async function startMonitoring(name) {
   sessionState    = SessionState.MONITORING;
   offlineSessionStartEnergy = null;
   pendingSessionId = null;
+  pendingStartCommandAt = null;
+  pendingRelayConfirmed = false;
 
   await saveActiveSession({ ...activeDevice, startTime, energyBaseline });
   if (valDeviceName)  valDeviceName.textContent  = name;
@@ -645,6 +653,8 @@ async function alignActiveSessionFromEsp() {
     sessionSaved = false;
     pendingDeviceName = null;
     pendingSessionId = null;
+    pendingStartCommandAt = null;
+    pendingRelayConfirmed = false;
     clearInterval(timerInterval);
     timerInterval = setInterval(updateTimer, 1000);
     if (valDeviceName)  valDeviceName.textContent  = activeDevice.name;
@@ -753,6 +763,8 @@ btnSaveDev.addEventListener("click", async () => {
     showToast(`Menyalakan relay untuk "${name}"...`, "");
     pendingDeviceName = name;
     pendingSessionId = makeId("sess");
+    pendingStartCommandAt = Date.now();
+    pendingRelayConfirmed = false;
     sessionState = SessionState.WAITING_LOAD;
     await sendRelayCommand("START", {
       sessionId: pendingSessionId,
@@ -828,7 +840,8 @@ onValue(ref(db, "live"), snapshot => {
   firebaseCost     = dev.cost      || 0;
   firebaseOverload = dev.overload  === true;
 
-  if (current > 0.01 && firebasePower > 0.5 && firebaseEnergy > 0) {
+  if (firebaseSessionState !== SessionState.WAITING_LOAD &&
+      current >= LOAD_MIN_CURRENT && firebasePower >= LOAD_MIN_POWER && firebaseEnergy > 0) {
     lastknownEnergy = firebaseEnergy;
   }
 });
@@ -846,7 +859,10 @@ async function updateMeters() {
   // ── Hitung systemOnline ──────────────────────────────────
   const dataFresh = firebaseTimestamp > 0 && diff <= STALE_THRESHOLD;
   systemOnline = systemInternet && dataFresh;
-  deviceOnline = systemOnline && current > 0.01 && firebasePower > 0.5;
+  deviceOnline = systemOnline &&
+    firebaseSessionState !== SessionState.WAITING_LOAD &&
+    current >= LOAD_MIN_CURRENT &&
+    firebasePower >= LOAD_MIN_POWER;
 
   const webOverload = deviceOnline && firebasePower >= settings.overloadThreshold;
   systemMode = deriveSystemMode();
@@ -909,7 +925,19 @@ async function updateMeters() {
   if (!prevRelayState && firebaseRelay && systemOnline) {
     setRelayBanner(false);
   }
+  if (pendingDeviceName && firebaseRelay) pendingRelayConfirmed = true;
   prevRelayState = firebaseRelay;
+
+  const pendingStartExpired = pendingStartCommandAt && Date.now() - pendingStartCommandAt > 20000;
+  if (systemOnline && pendingDeviceName && !firebaseRelay && !firebaseSessionActive &&
+      (pendingRelayConfirmed || pendingStartExpired)) {
+    showToast(`Monitoring "${pendingDeviceName}" dibatalkan: load tidak terdeteksi`, "error");
+    pendingDeviceName = null;
+    pendingSessionId = null;
+    pendingStartCommandAt = null;
+    pendingRelayConfirmed = false;
+    sessionState = SessionState.IDLE;
+  }
 
   if (systemOnline && firebaseRelay && firebaseSessionActive) {
     const resumed = await alignActiveSessionFromEsp();

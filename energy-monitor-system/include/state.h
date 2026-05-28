@@ -88,6 +88,9 @@ extern unsigned long sessionStartTs;
 extern int   offlineDeviceCounter;
 extern bool  recoveredSessionPending;
 extern int   recoveredNoDeviceCount;
+extern bool  loadCheckPending;
+extern unsigned long loadCheckStartedMs;
+extern int   loadDetectStableCount;
 
 // ── Last sensor readings ─────────────────────────────────────────
 extern float lastV;
