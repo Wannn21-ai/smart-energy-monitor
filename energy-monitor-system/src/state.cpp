@@ -32,6 +32,7 @@ SessionState sessionState = SessionState::IDLE;
 bool wifiConnected = false;
 bool ntpSynced     = false;
 bool modeOffline   = false;
+bool manualOfflineRequested = false;
 unsigned long offlineStartMs       = 0;
 unsigned long lastModeTransitionMs = 0;
 
@@ -96,6 +97,21 @@ const char* sessionStateToString(SessionState state) {
     return "IDLE";
 }
 
+const char* sessionEndReasonToString(SessionEndReason reason) {
+    switch (reason) {
+        case SESSION_END_NONE: return "NONE";
+        case SESSION_END_NORMAL_STOP:
+        case SESSION_END_USER_STOP:
+            return "NORMAL_STOP";
+        case SESSION_END_LOAD_REMOVED:
+        case SESSION_END_DEVICE_DISCONNECT:
+            return "LOAD_REMOVED";
+        case SESSION_END_OVERLOAD: return "OVERLOAD";
+        case SESSION_END_RECOVERY_MISSING_DEVICE: return "RECOVERY_MISSING_DEVICE";
+    }
+    return "NONE";
+}
+
 void setSystemMode(SystemMode next, const char* reason) {
     if (systemMode == next) return;
     Serial.printf("[State] SystemMode %s -> %s (%s)\n",
@@ -119,7 +135,7 @@ void syncStateMachineFromLegacy() {
 
     if (isOverload || overloadAlertLinger) {
         sessionState = SessionState::OVERLOAD;
-    } else if (relayOn && sessionActive && deviceConnected) {
+    } else if (relayOn && sessionActive) {
         sessionState = SessionState::MONITORING;
     } else if (relayOn && (loadCheckPending || !deviceConnected)) {
         sessionState = SessionState::WAITING_LOAD;

@@ -44,6 +44,7 @@ bool fsReadSession(PersistedSession &out);
 // ── Offline History Queue ────────────────────────────────────────
 void fsAppendOfflineHistory(const char* name, unsigned long startTs,
                             unsigned long endTs, float energyKwh,
-                            float cost, float avgPower, bool wasOverload);
+                            float cost, float avgPower, bool wasOverload,
+                            const char* endReason = "NORMAL_STOP");
 bool fsSyncOfflineHistoryToFirebase();
 int  fsCountOfflineHistory();

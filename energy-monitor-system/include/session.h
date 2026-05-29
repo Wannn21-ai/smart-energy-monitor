@@ -14,6 +14,7 @@ void setRelay(bool on, const char* reason = "");
 // ── Mode Transitions ─────────────────────────────────────────────
 void transitionToOnlineMode();
 void transitionToOfflineMode(const char* reason = "");
+void enterManualOfflineMonitoringMode(const char* reason = "");
 void handleReconnectResync();
 
 // ── Offline Session ──────────────────────────────────────────────
@@ -27,6 +28,7 @@ void handleRecoveredSessionCheck();
 // ── Device Disconnect & Overload ─────────────────────────────────
 void beginLoadCheck(const char* reason = "");
 void handleLoadCheck(float current, float power);
+void handleLoadRemovedDuringMonitoring(float current, float power);
 void handleDeviceDisconnect();
 void handleOverload(float power);
 

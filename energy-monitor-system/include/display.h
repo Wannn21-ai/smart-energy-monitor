@@ -18,4 +18,5 @@ void oledSplash();
 void oledStatus(const char* l1, const char* l2 = "");
 void oledData(float v, float i, float p, float pf, float hz,
               float kwh, float cost, bool dev, bool online,
-              bool ovl, bool relay, bool offline, unsigned long offMs);
+              bool ovl, bool relay, bool offline, unsigned long offMs,
+              unsigned long sessionDurationSec);

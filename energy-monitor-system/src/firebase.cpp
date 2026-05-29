@@ -22,14 +22,14 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
                     float kwh, float cost, bool dev, bool ovl,
                     bool relay, unsigned long ts) {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
-    syncStateMachineFromLegacy();
+    syncSessionDataFromLegacy(ts);
 
     WiFiClientSecure c; c.setInsecure(); c.setTimeout(10000);
     HTTPClient h;
     h.begin(c, String(FIREBASE_HOST) + String(FIREBASE_PATH));
     h.addHeader("Content-Type", "application/json");
 
-    unsigned long elapsedSec = getSessionElapsedSec(ts);
+    unsigned long elapsedSec = sessionData.duration;
     const char* systemModeStr = systemModeToString(systemMode);
     const char* sessionStateStr = sessionStateToString(sessionState);
     const char* modeStr = modeOffline
@@ -52,6 +52,7 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
     j += ",\"mode\":\"";        j += modeStr; j += "\"";
     j += ",\"systemMode\":\"";  j += systemModeStr; j += "\"";
     j += ",\"sessionState\":\""; j += sessionStateStr; j += "\"";
+    j += ",\"endReason\":\"";    j += sessionEndReasonToString(sessionData.endReason); j += "\"";
     j += ",\"uid\":\"";         j += jsonEscape(currentUid); j += "\"";
     j += ",\"sessionId\":\"";   j += jsonEscape(currentSessionId); j += "\"";
     j += ",\"deviceName\":\"";  j += jsonEscape(sessionDeviceName); j += "\"";
@@ -83,7 +84,8 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
 // ================================================================
 bool pushHistoryToFirebase(const char* name, const char* duration,
                            float avgPower, float energyKwh, float cost,
-                           unsigned long ts, bool recovered, bool wasOverload) {
+                           unsigned long ts, bool recovered, bool wasOverload,
+                           const char* endReason) {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
 
     char dateStr[20] = "—";
@@ -130,18 +132,21 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
     String safeName = jsonEscape(displayName);
     String safeDuration = jsonEscape(duration);
     String safeSessionId = jsonEscape(currentSessionId);
+    String safeEndReason = jsonEscape(endReason && strlen(endReason) > 0 ? endReason : "NORMAL_STOP");
 
     char body[640];
     snprintf(body, sizeof(body),
         "{\"name\":\"%s\",\"duration\":\"%s\",\"power\":%.1f,"
         "\"energy\":%.4f,\"cost\":\"%s\",\"date\":\"%s\","
-        "\"timestamp\":%lu,\"isOverload\":%s,\"recovered\":%s,\"sessionId\":\"%s\"}",
+        "\"timestamp\":%lu,\"isOverload\":%s,\"recovered\":%s,"
+        "\"sessionId\":\"%s\",\"endReason\":\"%s\"}",
         safeName.c_str(), safeDuration.c_str(), avgPower,
         energyKwh, costStr, dateStr,
         historyKey,
         wasOverload ? "true" : "false",
         recovered   ? "true" : "false",
-        safeSessionId.c_str());
+        safeSessionId.c_str(),
+        safeEndReason.c_str());
 
     int code = h.PUT(body);
     h.end();
@@ -287,14 +292,18 @@ void pollCommandFromFirebase() {
 
     } else if (cmdStop && relayOn) {
         unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+        sessionData.endReason = SESSION_END_NORMAL_STOP;
+        setSessionState(SessionState::FINISHED, "web command STOP");
         if (!cmdSkipHistory && sessionActive && sessionKwh > 0) {
             String dur = buildDuration(sessionStartTs, nowTs);
             bool ok = pushHistoryToFirebase(sessionDeviceName, dur.c_str(),
                                             lastP, sessionKwh, sessionCost,
-                                            nowTs, false, false);
+                                            nowTs, false, false,
+                                            sessionEndReasonToString(sessionData.endReason));
             if (!ok) {
                 fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                                      sessionKwh, sessionCost, lastP, false);
+                                      sessionKwh, sessionCost, lastP, false,
+                                      sessionEndReasonToString(sessionData.endReason));
             }
         }
         setRelay(false, "web command STOP");

@@ -225,7 +225,7 @@ void loop() {
     // Recovery, disconnect & overload
     handleLoadCheck(current, power);
     handleRecoveredSessionCheck();
-    handleDeviceDisconnect();
+    handleLoadRemovedDuringMonitoring(current, power);
     handleOverload(power);
     syncStateMachineFromLegacy();
 
@@ -261,7 +261,8 @@ void loop() {
     oledData(voltage, current, power, pf, frequency,
              sessionKwh, sessionCost,
              deviceConnected, wifiConnected,
-             isOverload, relayOn, modeOffline, offMs);
+             isOverload, relayOn, modeOffline, offMs,
+             sessionData.duration);
 
     // Send to Firebase
     if (wifiConnected) {

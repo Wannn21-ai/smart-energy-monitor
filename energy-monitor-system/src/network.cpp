@@ -92,12 +92,19 @@ bool tryConnectWiFi(int sec) {
     while (millis() - start < timeout && WiFi.status() != WL_CONNECTED) {
         dnsServer.processNextRequest();
         localServer.handleClient();
+        if (manualOfflineRequested) break;
         indicatorsUpdate();
 
         delay(100);
     }
     indicatorsSetWifiSearching(false);
     indicatorsUpdate();
+
+    if (manualOfflineRequested) {
+        manualOfflineRequested = false;
+        Serial.println("\n[WiFi] Manual offline requested");
+        return false;
+    }
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\n[WiFi] OK: " + WiFi.localIP().toString());
@@ -210,7 +217,8 @@ static void handleRoot() {
         "color:#f0f0f0;font-size:15px;outline:none}select:focus,input:focus{border-color:#00e5ff}"
         ".btn{display:block;width:100%;padding:14px;border:none;border-radius:8px;font-size:15px;font-weight:700;"
         "cursor:pointer;margin-top:16px}.btn-p{background:#00e5ff;color:#000}.btn-g{background:transparent;color:#bbb;"
-        "border:1px solid #333;margin-top:8px}.notice{border-radius:8px;padding:10px 12px;font-size:12px;margin:12px 0}"
+        "border:1px solid #333;margin-top:8px}.btn-o{background:#ffab00;color:#000;margin-top:8px}"
+        ".notice{border-radius:8px;padding:10px 12px;font-size:12px;margin:12px 0}"
         ".ok{background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.25);color:#00e676}"
         ".warn{background:rgba(255,171,0,.1);border:1px solid rgba(255,171,0,.25);color:#ffab00}"
         ".err{background:rgba(255,23,68,.1);border:1px solid rgba(255,23,68,.25);color:#ff6b82}"
@@ -232,6 +240,7 @@ static void handleRoot() {
         "<label>Password</label>"
         "<input type='password' id='wpass' placeholder='Password WiFi'/>"
         "<button class='btn btn-p' onclick='connect()'>Hubungkan</button>"
+        "<button class='btn btn-o' onclick='offlineMode()'>Lanjutkan ke Mode Offline</button>"
         "<button class='btn btn-g' onclick='rescan()'>Scan Ulang</button></div>"
         "<div class='card'><div class='title'>Pengaturan</div>"
         "<label>Tarif / kWh (IDR)</label>"
@@ -273,6 +282,12 @@ function save(){
 }
 function resetWifi(){if(!confirm('Reset WiFi?'))return;
 fetch('/resetwifi').then(function(){toast('Mereset...','info');});}
+function offlineMode(){
+    toast('Masuk Mode Offline...','info');
+    fetch('/offline').then(function(r){return r.text();})
+        .then(function(t){toast(t,'ok');setTimeout(function(){location.reload();},1500);})
+        .catch(function(){toast('Gagal masuk Mode Offline','err');});
+}
 document.addEventListener('keydown',function(e){if(e.key==='Enter')connect();});
 )JS";
 
@@ -355,6 +370,12 @@ static void handleConnectWifi() {
     }
 }
 
+static void handleOfflineMode() {
+    localServer.send(200, "text/plain", "Mode Offline aktif. Relay ON untuk sesi offline pertama.");
+    enterManualOfflineMonitoringMode("captive portal offline");
+    beginWifiScan();
+}
+
 static void handleResetWifi() {
     localServer.send(200, "text/plain", "Mereset WiFi - ESP32 restart...");
     delay(500);
@@ -395,6 +416,7 @@ void setupWebServer() {
     localServer.on("/index.html",  HTTP_GET, handleRoot);
     localServer.on("/save",        HTTP_GET, handleSave);
     localServer.on("/connectwifi", HTTP_GET, handleConnectWifi);
+    localServer.on("/offline",     HTTP_GET, handleOfflineMode);
     localServer.on("/resetwifi",   HTTP_GET, handleResetWifi);
     localServer.on("/status",      HTTP_GET, handleStatus);
     localServer.on("/rescan",      HTTP_GET, handleRescan);

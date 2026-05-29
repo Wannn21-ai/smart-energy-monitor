@@ -203,6 +203,7 @@ bool fsWriteSession() {
     doc["mode"]          = (sessionData.mode == SESSION_MODE_OFFLINE) ? "OFFLINE" : "ONLINE";
     doc["systemMode"]    = systemModeToString(systemMode);
     doc["sessionState"]  = sessionStateToString(sessionState);
+    doc["endReason"]     = sessionEndReasonToString(sessionData.endReason);
     doc["uid"]           = currentUid;
     doc["sessionId"]     = currentSessionId;
 
@@ -306,7 +307,8 @@ bool fsReadSession(PersistedSession &out) {
 // ================================================================
 void fsAppendOfflineHistory(const char* name, unsigned long startTs,
                             unsigned long endTs, float energyKwh,
-                            float cost, float avgPower, bool wasOverload) {
+                            float cost, float avgPower, bool wasOverload,
+                            const char* endReason) {
     DynamicJsonDocument doc(4096);
     JsonArray arr;
 
@@ -334,6 +336,7 @@ void fsAppendOfflineHistory(const char* name, unsigned long startTs,
     entry["cost"]     = cost;
     entry["power"]    = avgPower;
     entry["overload"] = wasOverload;
+    entry["endReason"] = endReason && strlen(endReason) > 0 ? endReason : "NORMAL_STOP";
     entry["uid"]      = currentUid;
     entry["sessionId"] = currentSessionId;
 
@@ -381,6 +384,7 @@ bool fsSyncOfflineHistoryToFirebase() {
         float         cost    = entry["cost"]     | 0.0f;
         float         avgPwr  = entry["power"]    | 0.0f;
         bool          wasOvl  = entry["overload"] | false;
+        const char*   reason  = entry["endReason"] | (wasOvl ? "OVERLOAD" : "NORMAL_STOP");
         const char*   uid     = entry["uid"]      | "";
         const char*   sessId  = entry["sessionId"] | "";
 
@@ -390,7 +394,7 @@ bool fsSyncOfflineHistoryToFirebase() {
         String dur = buildDuration(startTs, endTs);
         bool ok = pushHistoryToFirebase(name, dur.c_str(), avgPwr, kwh, cost,
                                         endTs > 0 ? endTs : startTs,
-                                        true, wasOvl);
+                                        true, wasOvl, reason);
         if (!ok) {
             Serial.printf("[Sync] Push '%s' gagal — berhenti\n", name);
             break;

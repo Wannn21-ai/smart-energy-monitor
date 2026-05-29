@@ -69,7 +69,8 @@ void oledStatus(const char* l1, const char* l2) {
 // ================================================================
 void oledData(float v, float i, float p, float pf, float hz,
               float kwh, float cost, bool dev, bool online,
-              bool ovl, bool relay, bool offline, unsigned long offMs) {
+              bool ovl, bool relay, bool offline, unsigned long offMs,
+              unsigned long sessionDurationSec) {
     display.clearDisplay();
     display.setTextColor(WHITE);
     display.setTextSize(1);
@@ -161,8 +162,10 @@ void oledData(float v, float i, float p, float pf, float hz,
 
     display.setCursor(0, 47); display.printf("E:%.4fkWh", kwh);
     display.setCursor(0, 57);
-    if (cost >= 1000) display.printf("Rp %lu",  (unsigned long)cost);
-    else              display.printf("Rp %.1f", cost);
+    display.printf("T:%02lu:%02lu:%02lu",
+                   sessionDurationSec / 3600,
+                   (sessionDurationSec % 3600) / 60,
+                   sessionDurationSec % 60);
 
     display.display();
 }

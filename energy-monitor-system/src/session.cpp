@@ -68,6 +68,8 @@ static bool isBlackoutReset(int reason) {
     return reset == ESP_RST_POWERON || reset == ESP_RST_BROWNOUT;
 }
 
+static unsigned long loadRemovedSinceMs = 0;
+
 // ================================================================
 // RELAY — single entry point, atomic state update
 // ================================================================
@@ -93,6 +95,7 @@ void setRelay(bool on, const char* reason) {
         loadCheckPending = false;
         loadCheckStartedMs = 0;
         loadDetectStableCount = 0;
+        loadRemovedSinceMs = 0;
         disconnectCount = 0;
         recoveredSessionPending = false;
         recoveredNoDeviceCount = 0;
@@ -106,9 +109,11 @@ void setRelay(bool on, const char* reason) {
 // ================================================================
 void beginLoadCheck(const char* reason) {
     sessionActive = false;
+    sessionData.endReason = SESSION_END_NONE;
     loadCheckPending = true;
     loadCheckStartedMs = millis();
     loadDetectStableCount = 0;
+    loadRemovedSinceMs = 0;
     deviceConnected = false;
     prevDevConn = false;
     setRelay(true, reason);
@@ -175,22 +180,26 @@ void handleLoadCheck(float current, float power) {
     }
 }
 
-static void archiveCurrentSession(unsigned long nowTs, float power, bool recovered, bool wasOverload) {
+static void archiveCurrentSession(unsigned long nowTs, float power, bool recovered, bool wasOverload,
+                                  SessionEndReason endReason) {
     if (strlen(sessionDeviceName) == 0) strlcpy(sessionDeviceName, "Device", sizeof(sessionDeviceName));
+    sessionData.endReason = endReason;
+    syncSessionDataFromLegacy(nowTs);
     String dur = buildDuration(sessionStartTs, nowTs);
+    const char* reasonText = sessionEndReasonToString(endReason);
 
     if (wifiConnected) {
         bool ok = pushHistoryToFirebase(sessionDeviceName, dur.c_str(),
-                                       power, sessionKwh, sessionCost,
-                                       nowTs, recovered, wasOverload);
+                                       power, sessionData.energy, sessionData.cost,
+                                       nowTs, recovered, wasOverload, reasonText);
         Serial.printf("[Session] History push: %s\n", ok ? "OK" : "FAIL");
         if (!ok) {
             fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                                  sessionKwh, sessionCost, power, wasOverload);
+                                  sessionData.energy, sessionData.cost, power, wasOverload, reasonText);
         }
     } else {
         fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                              sessionKwh, sessionCost, power, wasOverload);
+                              sessionData.energy, sessionData.cost, power, wasOverload, reasonText);
         Serial.println("[Session] History queued offline");
     }
 }
@@ -210,7 +219,7 @@ static bool finalizeMissingLoadOnReconnect(unsigned long nowTs) {
     if (!prevDevConn && disconnectCount == 0) return false;
 
     Serial.println("[Reconnect] Load missing, finalizing active session");
-    archiveCurrentSession(nowTs, lastP, false, false);
+    archiveCurrentSession(nowTs, lastP, false, false, SESSION_END_LOAD_REMOVED);
     clearFinishedSession("load missing after reconnect");
     syncSessionDataFromLegacy(nowTs);
     sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, false, false, nowTs);
@@ -298,6 +307,21 @@ void transitionToOfflineMode(const char* reason) {
 // ================================================================
 // OFFLINE SESSION — start new
 // ================================================================
+void enterManualOfflineMonitoringMode(const char* reason) {
+    manualOfflineRequested = !wifiConnected;
+    WiFi.disconnect(false, false);
+    if (!modeOffline) {
+        transitionToOfflineMode(reason ? reason : "manual offline");
+    }
+
+    if (!relayOn && !sessionActive && !loadCheckPending) {
+        startOfflineSession(reason ? reason : "manual offline");
+        oledStatus("Offline Mode", sessionDeviceName);
+    } else {
+        oledStatus("Offline Mode", relayOn ? sessionDeviceName : "Idle");
+    }
+}
+
 void startOfflineSession(const char* reason) {
     sessionDeviceName[0] = '\0';
     generateOfflineDeviceName();
@@ -309,6 +333,7 @@ void startOfflineSession(const char* reason) {
     deviceConnected     = false;
     prevDevConn         = false;
     disconnectCount     = 0;
+    loadRemovedSinceMs  = 0;
     isOverload          = false;
     overloadWarning     = false;
     overloadAlertLinger = false;
@@ -406,7 +431,7 @@ void handleRecoveredSessionCheck() {
 
     unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
     Serial.println("[Recovery] Device tidak ada, arsipkan checkpoint terakhir");
-    archiveCurrentSession(nowTs, lastP, true, false);
+    archiveCurrentSession(nowTs, lastP, true, false, SESSION_END_RECOVERY_MISSING_DEVICE);
     if (wifiConnected) {
         sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, false, nowTs);
     }
@@ -416,12 +441,65 @@ void handleRecoveredSessionCheck() {
     hadDataOnce = false; prevDevConn = false;
     sessionDeviceName[0] = '\0';
     currentSessionId[0] = '\0';
+    sessionData.endReason = SESSION_END_NONE;
     saveSessionId();
 }
 
 // ================================================================
 // HANDLE DEVICE DISCONNECT
 // ================================================================
+void handleLoadRemovedDuringMonitoring(float current, float power) {
+    if (!relayOn || !sessionActive || loadCheckPending || recoveredSessionPending) {
+        loadRemovedSinceMs = 0;
+        disconnectCount = 0;
+        return;
+    }
+
+    bool loadPresent = current >= LOAD_MIN_CURRENT && power >= LOAD_MIN_POWER;
+    if (loadPresent) {
+        loadRemovedSinceMs = 0;
+        disconnectCount = 0;
+        prevDevConn = true;
+        return;
+    }
+
+    if (!hadDataOnce && !prevDevConn) return;
+
+    unsigned long nowMs = millis();
+    if (loadRemovedSinceMs == 0) {
+        loadRemovedSinceMs = nowMs;
+        disconnectCount = 1;
+        Serial.println("[Disconnect] Load below threshold, starting debounce");
+        return;
+    }
+
+    unsigned long missingMs = nowMs - loadRemovedSinceMs;
+    disconnectCount++;
+    Serial.printf("[Disconnect] Load missing for %lums I=%.2fA P=%.1fW\n",
+                  missingMs, current, power);
+
+    if (missingMs < LOAD_REMOVED_DEBOUNCE_MS) return;
+
+    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+    Serial.println("[Disconnect] Load removed - finalizing session locally");
+
+    sessionData.endReason = SESSION_END_LOAD_REMOVED;
+    setSessionState(SessionState::FINISHED, "load removed");
+    archiveCurrentSession(nowTs, lastP, false, false, SESSION_END_LOAD_REMOVED);
+
+    setRelay(false, "load removed");
+    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
+    hadDataOnce = false; prevDevConn = false; deviceConnected = false;
+    sessionDeviceName[0] = '\0';
+    currentSessionId[0] = '\0';
+    saveSessionId();
+    oledStatus("Load removed", "Session saved");
+
+    if (wifiConnected) {
+        sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, false, false, nowTs);
+    }
+}
+
 void handleDeviceDisconnect() {
     if (!relayOn || !sessionActive) return;
     if (!deviceConnected && prevDevConn) {
@@ -430,7 +508,7 @@ void handleDeviceDisconnect() {
         if (disconnectCount >= DISCONNECT_THRESHOLD) {
             Serial.println("[Disconnect] ✓ Device dicabut — simpan sesi, relay OFF");
             unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-            archiveCurrentSession(nowTs, lastP, false, false);
+            archiveCurrentSession(nowTs, lastP, false, false, SESSION_END_LOAD_REMOVED);
             if (wifiConnected) {
                 sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, false, nowTs);
             }
@@ -492,7 +570,7 @@ void handleOverload(float power) {
     overloadLingerStart = millis();
     indicatorsResetAlertPattern();
 
-    archiveCurrentSession(nowTs, power, false, true);
+    archiveCurrentSession(nowTs, power, false, true, SESSION_END_OVERLOAD);
     sessionActive = false;
     if (wifiConnected) {
         sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, true, false, nowTs);
@@ -509,14 +587,15 @@ void handleOverload(float power) {
 
 // ================================================================
 // CHECK RESET BUTTON (GPIO 0 / BOOT)
-//   >= 1s (< 5s) : mulai sesi offline baru (jika kondisi memungkinkan)
-//   >= 5s        : reset WiFi credentials + restart
+//   >= 1s (< 5s)  : mulai sesi offline baru (jika kondisi memungkinkan)
+//   >= 5s (< 10s) : reset WiFi credentials + restart
+//   >= 10s        : masuk mode offline monitoring
 // ================================================================
 void checkResetButton() {
     if (digitalRead(PIN_RESET_WIFI) != LOW) return;
 
     unsigned long pressStart = millis();
-    oledStatus("Tahan utk aksi", "1s=Baru 5s=Reset");
+    oledStatus("Tahan utk aksi", "1s=Baru 10s=Offline");
 
     // Perlu akses WebServer & DNS — include forward declarations di sini
     // via extern. Deklarasi dilakukan di network.h.
@@ -524,8 +603,10 @@ void checkResetButton() {
 
     while (digitalRead(PIN_RESET_WIFI) == LOW) {
         unsigned long held = millis() - pressStart;
-        if (held >= BTN_RESET_WIFI_HOLD) {
-            oledStatus("Reset WiFi...", "Lepaskan utk batal");
+        if (held >= BTN_OFFLINE_MODE_HOLD) {
+            oledStatus("Mode Offline", "Lepaskan utk masuk");
+        } else if (held >= BTN_RESET_WIFI_HOLD) {
+            oledStatus("Reset WiFi...", "Lepas=Reset");
         } else if (held >= BTN_NEW_SESSION_HOLD) {
             if (modeOffline && !relayOn && !sessionActive) {
                 oledStatus("Lepas=Sesi Baru", "Tahan=Reset WiFi");
@@ -541,7 +622,11 @@ void checkResetButton() {
     unsigned long held = millis() - pressStart;
     Serial.printf("[Button] Released after %lu ms\n", held);
 
-    if (held >= BTN_RESET_WIFI_HOLD) {
+    if (held >= BTN_OFFLINE_MODE_HOLD) {
+        Serial.println("[Button] Manual offline mode triggered");
+        enterManualOfflineMonitoringMode("BOOT hold 10s");
+
+    } else if (held >= BTN_RESET_WIFI_HOLD) {
         Serial.println("[Button] ★ Reset WiFi triggered");
         oledStatus("Reset WiFi...", "Restarting...");
         if (sessionActive && hadDataOnce) fsWriteSession();

@@ -15,7 +15,8 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
 // ── History Push ─────────────────────────────────────────────────
 bool pushHistoryToFirebase(const char* name, const char* duration,
                            float avgPower, float energyKwh, float cost,
-                           unsigned long ts, bool recovered, bool wasOverload);
+                           unsigned long ts, bool recovered, bool wasOverload,
+                           const char* endReason = "NORMAL_STOP");
 
 // ── Config Sync ──────────────────────────────────────────────────
 void syncConfigFromFirebase();

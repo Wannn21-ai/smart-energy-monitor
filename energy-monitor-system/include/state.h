@@ -29,6 +29,8 @@ enum class SessionState {
 
 enum SessionEndReason {
     SESSION_END_NONE,
+    SESSION_END_NORMAL_STOP,
+    SESSION_END_LOAD_REMOVED,
     SESSION_END_USER_STOP,
     SESSION_END_DEVICE_DISCONNECT,
     SESSION_END_OVERLOAD,
@@ -61,6 +63,7 @@ extern SessionState sessionState;
 
 const char* systemModeToString(SystemMode mode);
 const char* sessionStateToString(SessionState state);
+const char* sessionEndReasonToString(SessionEndReason reason);
 void setSystemMode(SystemMode next, const char* reason = "");
 void setSessionState(SessionState next, const char* reason = "");
 void syncStateMachineFromLegacy();
@@ -70,6 +73,7 @@ void syncSessionDataFromLegacy(unsigned long nowTs);
 extern bool wifiConnected;
 extern bool ntpSynced;
 extern bool modeOffline;
+extern bool manualOfflineRequested;
 extern unsigned long offlineStartMs;
 extern unsigned long lastModeTransitionMs;
 

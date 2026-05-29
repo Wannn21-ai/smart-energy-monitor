@@ -53,10 +53,12 @@
 #define LOAD_DETECT_STABLE_SAMPLES 2
 #define LOAD_MIN_CURRENT           0.02f
 #define LOAD_MIN_POWER             1.0f
+#define LOAD_REMOVED_DEBOUNCE_MS   6000UL
 
 // ── Button Hold Thresholds (ms) ──────────────────────────────────
 #define BTN_NEW_SESSION_HOLD 1000UL
 #define BTN_RESET_WIFI_HOLD  5000UL
+#define BTN_OFFLINE_MODE_HOLD 10000UL
 
 // ── Misc ─────────────────────────────────────────────────────────
 #define DISCONNECT_THRESHOLD 2
