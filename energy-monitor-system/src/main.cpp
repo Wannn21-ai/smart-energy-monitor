@@ -17,6 +17,7 @@
 #include "state.h"
 #include "storage.h"
 #include "display.h"
+#include "indicators.h"
 #include "firebase.h"
 #include "session.h"
 #include "network.h"
@@ -41,12 +42,9 @@ void setup() {
     Serial.printf("[Boot] Reset reason: %d\n", (int)resetReason);
 
     // GPIO init
-    pinMode(PIN_LED_BLUE,   OUTPUT); pinMode(PIN_LED_GREEN,  OUTPUT);
-    pinMode(PIN_LED_RED,    OUTPUT); pinMode(PIN_BUZZER,     OUTPUT);
     pinMode(PIN_RELAY,      OUTPUT); pinMode(PIN_RESET_WIFI, INPUT_PULLUP);
 
-    digitalWrite(PIN_LED_BLUE, LOW); digitalWrite(PIN_LED_GREEN, LOW);
-    digitalWrite(PIN_LED_RED,  LOW); digitalWrite(PIN_BUZZER,    LOW);
+    indicatorsBegin();
     digitalWrite(PIN_RELAY, RELAY_OFF);
     relayOn = false;
     setSessionState(SessionState::IDLE, "boot");
@@ -139,15 +137,12 @@ void loop() {
     checkResetButton();
 
     // ── LED & buzzer ─────────────────────────────────────────────
-    handleBlueLed();
-    handleGreenLed();
-    handleOverloadAlert();
+    indicatorsUpdate();
 
     // ── WiFi disconnect → offline mode ───────────────────────────
     if (wifiConnected && WiFi.status() != WL_CONNECTED) {
         Serial.println("[WiFi] ✗ Disconnected");
         wifiConnected = false;
-        digitalWrite(PIN_LED_BLUE, LOW);
         lastReconnectMs = now;
         wifiLostSinceMs = now;
         if (sessionActive && hadDataOnce) fsWriteSession();

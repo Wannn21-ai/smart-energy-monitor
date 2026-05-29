@@ -9,6 +9,7 @@
 #include "storage.h"
 #include "firebase.h"
 #include "session.h"
+#include "indicators.h"
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -84,25 +85,22 @@ static void syncPortalSettingsToFirebase() {
 bool tryConnectWiFi(int sec) {
     WiFi.begin();
     Serial.print("[WiFi] Connecting");
-    bool blink = false;
+    indicatorsSetWifiSearching(true);
     unsigned long start = millis();
     unsigned long timeout = (unsigned long)sec * 1000UL;
 
     while (millis() - start < timeout && WiFi.status() != WL_CONNECTED) {
         dnsServer.processNextRequest();
         localServer.handleClient();
+        indicatorsUpdate();
 
         delay(100);
-
-        if ((millis() - start) % 500 < 100) {
-            blink = !blink;
-            digitalWrite(PIN_LED_BLUE, blink);
-        }
     }
+    indicatorsSetWifiSearching(false);
+    indicatorsUpdate();
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\n[WiFi] OK: " + WiFi.localIP().toString());
-        digitalWrite(PIN_LED_BLUE, HIGH);
         return true;
     }
     Serial.println("\n[WiFi] Gagal");
@@ -127,6 +125,7 @@ void startLocalAP() {
     IPAddress ip(192, 168, 4, 1), sub(255, 255, 255, 0);
     WiFi.softAPConfig(ip, ip, sub);
     WiFi.softAP(AP_SSID, AP_PASS);
+    indicatorsSetCaptivePortalActive(true);
     dnsServer.stop();
     dnsServer.start(DNS_PORT, "*", ip);
     Serial.printf("[AP] '%s' aktif - 192.168.4.1\n", AP_SSID);
@@ -323,13 +322,17 @@ static void handleConnectWifi() {
 
     WiFi.scanDelete();
     WiFi.begin(ssid.c_str(), pass.c_str());
+    indicatorsSetWifiSearching(true);
     int waited = 0;
     while (WiFi.status() != WL_CONNECTED && waited < 20) {
+        indicatorsUpdate();
         delay(500);
         waited++;
         dnsServer.processNextRequest();
         localServer.handleClient();
     }
+    indicatorsSetWifiSearching(false);
+    indicatorsUpdate();
 
     if (WiFi.status() == WL_CONNECTED) {
         if (modeOffline) transitionToOnlineMode();

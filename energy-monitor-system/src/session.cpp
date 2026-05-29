@@ -10,6 +10,7 @@
 #include "storage.h"
 #include "firebase.h"
 #include "display.h"
+#include "indicators.h"
 
 #include <WiFi.h>
 #include <time.h>
@@ -87,6 +88,7 @@ void setRelay(bool on, const char* reason) {
 
     if (!on) {
         overloadWarning = false;
+        indicatorsResetAlertPattern();
         sessionActive = false;
         loadCheckPending = false;
         loadCheckStartedMs = 0;
@@ -457,9 +459,7 @@ void handleOverload(float power) {
     bool warning = canEvaluate && power >= warningAt && power < threshold;
     if (warning != overloadWarning) {
         overloadWarning = warning;
-        warningBlinkState = false;
-        digitalWrite(PIN_LED_RED, LOW);
-        digitalWrite(PIN_BUZZER, LOW);
+        indicatorsResetAlertPattern();
         Serial.printf("[Overload] Warning %s P=%.1fW threshold=%.0fW\n",
                       overloadWarning ? "ON" : "OFF", power, threshold);
     }
@@ -490,8 +490,7 @@ void handleOverload(float power) {
 
     overloadAlertLinger = true;
     overloadLingerStart = millis();
-    overloadBlinkState = false;
-    lastOverloadBlinkMs = 0;
+    indicatorsResetAlertPattern();
 
     archiveCurrentSession(nowTs, power, false, true);
     sessionActive = false;
@@ -535,6 +534,7 @@ void checkResetButton() {
             }
         }
         networkHandleClients();
+        indicatorsUpdate();
         delay(50);
     }
 

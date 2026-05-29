@@ -75,12 +75,6 @@ unsigned long lastThresholdSyncMs     = 0;
 unsigned long lastCommandPollMs       = 0;
 unsigned long lastCheckpointMs        = 0;
 unsigned long lastOfflineSyncRetryMs  = 0;
-unsigned long lastBlinkMs             = 0;
-bool          blinkState              = false;
-unsigned long lastOverloadBlinkMs     = 0;
-bool          overloadBlinkState      = false;
-unsigned long lastWarningBlinkMs      = 0;
-bool          warningBlinkState       = false;
 
 const char* systemModeToString(SystemMode mode) {
     switch (mode) {
