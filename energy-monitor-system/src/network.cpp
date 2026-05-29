@@ -49,8 +49,19 @@ static void syncPortalSettingsToFirebase() {
 
     if (h.begin(c, String(FIREBASE_HOST) + "/config/threshold.json")) {
         h.addHeader("Content-Type", "application/json");
-        h.PUT(String(overloadThreshold, 0));
+        h.PUT(String(appConfig.overloadThreshold, 0));
         h.end();
+    }
+
+    WiFiClientSecure cCfg; cCfg.setInsecure(); cCfg.setTimeout(5000);
+    HTTPClient hCfg;
+    if (hCfg.begin(cCfg, String(FIREBASE_HOST) + "/config/app.json")) {
+        hCfg.addHeader("Content-Type", "application/json");
+        String body = "{\"overloadThreshold\":" + String(appConfig.overloadThreshold, 0) +
+                      ",\"electricityCostPerKwh\":" + String(appConfig.electricityCostPerKwh, 2) +
+                      ",\"tariff\":" + String(appConfig.electricityCostPerKwh, 2) + "}";
+        hCfg.PUT(body);
+        hCfg.end();
     }
 
     if (strlen(currentUid) == 0) return;
@@ -60,8 +71,8 @@ static void syncPortalSettingsToFirebase() {
     String path = String("/users/") + currentUid + "/settings.json";
     if (h2.begin(c2, String(FIREBASE_HOST) + path)) {
         h2.addHeader("Content-Type", "application/json");
-        String body = "{\"overloadThreshold\":" + String(overloadThreshold, 0) +
-                      ",\"tariff\":" + String(tarif, 2) + "}";
+        String body = "{\"overloadThreshold\":" + String(appConfig.overloadThreshold, 0) +
+                      ",\"tariff\":" + String(appConfig.electricityCostPerKwh, 2) + "}";
         h2.PATCH(body);
         h2.end();
     }
@@ -225,9 +236,9 @@ static void handleRoot() {
         "<button class='btn btn-g' onclick='rescan()'>Scan Ulang</button></div>"
         "<div class='card'><div class='title'>Pengaturan</div>"
         "<label>Tarif / kWh (IDR)</label>"
-        "<input type='number' id='trf' value='" + String(tarif, 2) + "' step='0.01'/>"
+        "<input type='number' id='trf' value='" + String(appConfig.electricityCostPerKwh, 2) + "' step='0.01'/>"
         "<label>Batas Overload (Watt)</label>"
-        "<input type='number' id='thr' value='" + String(overloadThreshold, 0) + "' step='100'/>"
+        "<input type='number' id='thr' value='" + String(appConfig.overloadThreshold, 0) + "' step='100'/>"
         "<button class='btn btn-p' onclick='save()'>Simpan Pengaturan</button>"
         "<button class='btn btn-g' onclick='resetWifi()'>Reset WiFi</button></div>"
         "<div id='toast'></div>"
@@ -277,21 +288,26 @@ document.addEventListener('keydown',function(e){if(e.key==='Enter')connect();});
 }
 
 static void handleSave() {
-    bool ok = false;
+    bool ok = true;
+    bool hasConfig = false;
+    AppConfig next = appConfig;
     if (localServer.hasArg("thr")) {
         float v = localServer.arg("thr").toFloat();
-        if (setOverloadThreshold(v, "captive portal")) ok = true;
+        next.overloadThreshold = v;
+        hasConfig = true;
     }
     if (localServer.hasArg("trf")) {
         float v = localServer.arg("trf").toFloat();
-        if (v > 0) { tarif = v; ok = true; }
+        next.electricityCostPerKwh = v;
+        hasConfig = true;
     }
+    if (hasConfig) ok = setAppConfig(next, "captive portal");
+    else ok = false;
     if (ok) {
-        savePrefs();
         syncPortalSettingsToFirebase();
         localServer.send(200, "text/plain",
-            "Tersimpan! Threshold=" + String(overloadThreshold, 0) +
-            "W | Tarif=Rp" + String(tarif, 2));
+            "Tersimpan! Threshold=" + String(appConfig.overloadThreshold, 0) +
+            "W | Tarif=Rp" + String(appConfig.electricityCostPerKwh, 2));
     } else {
         localServer.send(400, "text/plain", "Nilai tidak valid");
     }
@@ -321,7 +337,7 @@ static void handleConnectWifi() {
 
         WiFi.setSleep(false);
         if (!ntpSynced) ntpSynced = tryNTPSync();
-        syncThresholdFromFirebase();
+        syncConfigFromFirebase();
         clearFirebaseCommand();
         fsSyncOfflineHistoryToFirebase();
         beginWifiScan();
@@ -353,8 +369,8 @@ static void handleStatus() {
                   ",\"mode\":\"" + String(modeOffline ? "offline" : "online") + "\"" +
                   ",\"systemMode\":\"" + String(systemModeToString(systemMode)) + "\"" +
                   ",\"sessionState\":\"" + String(sessionStateToString(sessionState)) + "\"" +
-                  ",\"threshold\":" + String(overloadThreshold, 0) +
-                  ",\"tarif\":" + String(tarif, 2) +
+                  ",\"threshold\":" + String(appConfig.overloadThreshold, 0) +
+                  ",\"tarif\":" + String(appConfig.electricityCostPerKwh, 2) +
                   ",\"pendingSync\":" + String(pending) + "}";
     localServer.send(200, "application/json", json);
 }

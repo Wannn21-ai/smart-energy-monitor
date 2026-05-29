@@ -86,19 +86,34 @@ static bool commitSessionCheckpoint(StaticJsonDocument<N> &doc) {
 // ================================================================
 // PREFERENCES
 // ================================================================
+static bool validOverloadThreshold(float threshold) {
+    return threshold > 0.0f && threshold <= 10000.0f;
+}
+
+static bool validElectricityCost(float costPerKwh) {
+    return costPerKwh > 0.0f;
+}
+
 void loadPrefs() {
     prefs.begin("sem", true);
-    overloadThreshold = prefs.getFloat("threshold", THRESHOLD_DEFAULT);
-    tarif             = prefs.getFloat("tarif",     TARIF_DEFAULT);
+    appConfig.overloadThreshold     = prefs.getFloat("threshold", THRESHOLD_DEFAULT);
+    appConfig.electricityCostPerKwh = prefs.getFloat("tarif",     TARIF_DEFAULT);
     prefs.getString("uid",       currentUid,       sizeof(currentUid));
     prefs.getString("sessionId", currentSessionId, sizeof(currentSessionId));
     prefs.end();
+
+    if (!validOverloadThreshold(appConfig.overloadThreshold)) {
+        appConfig.overloadThreshold = THRESHOLD_DEFAULT;
+    }
+    if (!validElectricityCost(appConfig.electricityCostPerKwh)) {
+        appConfig.electricityCostPerKwh = TARIF_DEFAULT;
+    }
 }
 
 void savePrefs() {
     prefs.begin("sem", false);
-    prefs.putFloat("threshold", overloadThreshold);
-    prefs.putFloat("tarif",     tarif);
+    prefs.putFloat("threshold", appConfig.overloadThreshold);
+    prefs.putFloat("tarif",     appConfig.electricityCostPerKwh);
     prefs.end();
 }
 
@@ -111,13 +126,30 @@ void saveSessionId() {
 }
 
 bool setOverloadThreshold(float threshold, const char* source) {
-    if (threshold <= 0.0f || threshold > 10000.0f) return false;
-    if (threshold == overloadThreshold) return true;
+    AppConfig next = appConfig;
+    next.overloadThreshold = threshold;
+    return setAppConfig(next, source);
+}
 
-    overloadThreshold = threshold;
+bool setElectricityCostPerKwh(float costPerKwh, const char* source) {
+    AppConfig next = appConfig;
+    next.electricityCostPerKwh = costPerKwh;
+    return setAppConfig(next, source);
+}
+
+bool setAppConfig(const AppConfig& next, const char* source) {
+    if (!validOverloadThreshold(next.overloadThreshold)) return false;
+    if (!validElectricityCost(next.electricityCostPerKwh)) return false;
+
+    bool changed = next.overloadThreshold != appConfig.overloadThreshold ||
+                   next.electricityCostPerKwh != appConfig.electricityCostPerKwh;
+    if (!changed) return true;
+
+    appConfig = next;
     savePrefs();
-    Serial.printf("[Prefs] Threshold %.0fW (%s)\n",
-                  overloadThreshold,
+    Serial.printf("[Prefs] Config threshold=%.0fW cost=%.2f/kWh (%s)\n",
+                  appConfig.overloadThreshold,
+                  appConfig.electricityCostPerKwh,
                   source && strlen(source) > 0 ? source : "update");
     return true;
 }

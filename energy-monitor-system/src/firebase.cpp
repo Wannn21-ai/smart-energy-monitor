@@ -42,8 +42,8 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
     j += "\"system\":{";
     j += "\"timestamp\":"      + String(ts);
     j += ",\"internet\":true";
-    j += ",\"threshold\":"     + String(overloadThreshold, 0);
-    j += ",\"tarif\":"         + String(tarif, 2);
+    j += ",\"threshold\":"     + String(appConfig.overloadThreshold, 0);
+    j += ",\"tarif\":"         + String(appConfig.electricityCostPerKwh, 2);
     j += ",\"relay\":"         + String(relay ? "true" : "false");
     j += ",\"offline\":"       + String(modeOffline ? "true" : "false");
     j += ",\"sessionActive\":" + String(sessionActive ? "true" : "false");
@@ -150,24 +150,54 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
 }
 
 // ================================================================
-// SYNC THRESHOLD FROM FIREBASE
+// SYNC CONFIG FROM FIREBASE
 // ================================================================
-void syncThresholdFromFirebase() {
+void syncConfigFromFirebase() {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return;
+
     WiFiClientSecure c; c.setInsecure(); c.setTimeout(8000);
     HTTPClient h;
-    if (!h.begin(c, String(FIREBASE_HOST) + "/config/threshold.json")) return;
-    if (h.GET() == 200) {
-        String pl = h.getString(); pl.trim();
+    if (h.begin(c, String(FIREBASE_HOST) + "/config/app.json")) {
+        if (h.GET() == 200) {
+            String pl = h.getString(); pl.trim();
+            if (pl != "null" && pl.length() > 0) {
+                StaticJsonDocument<256> doc;
+                if (!deserializeJson(doc, pl) && doc.is<JsonObject>()) {
+                    AppConfig next = appConfig;
+                    float threshold = doc["overloadThreshold"] | 0.0f;
+                    if (threshold <= 0) threshold = doc["threshold"] | 0.0f;
+                    float cost = doc["electricityCostPerKwh"] | 0.0f;
+                    if (cost <= 0) cost = doc["tariff"] | 0.0f;
+                    if (cost <= 0) cost = doc["tarif"] | 0.0f;
+                    if (threshold > 0) next.overloadThreshold = threshold;
+                    if (cost > 0) next.electricityCostPerKwh = cost;
+                    if (setAppConfig(next, "firebase config")) {
+                        Serial.printf("[Config] Updated: %.0fW %.2f/kWh\n",
+                                      appConfig.overloadThreshold,
+                                      appConfig.electricityCostPerKwh);
+                    }
+                    h.end();
+                    return;
+                }
+            }
+        }
+        h.end();
+    }
+
+    WiFiClientSecure c2; c2.setInsecure(); c2.setTimeout(8000);
+    HTTPClient h2;
+    if (!h2.begin(c2, String(FIREBASE_HOST) + "/config/threshold.json")) return;
+    if (h2.GET() == 200) {
+        String pl = h2.getString(); pl.trim();
         if (pl != "null" && pl.length() > 0) {
             float v = pl.toFloat();
-            if (v > 0 && v != overloadThreshold) {
+            if (v > 0 && v != appConfig.overloadThreshold) {
                 setOverloadThreshold(v, "firebase config");
                 Serial.printf("[Threshold] Updated: %.0fW\n", v);
             }
         }
     }
-    h.end();
+    h2.end();
 }
 
 // ================================================================
@@ -245,11 +275,10 @@ void pollCommandFromFirebase() {
         else if (strlen(sessionDeviceName) == 0) strlcpy(sessionDeviceName, "Device", sizeof(sessionDeviceName));
 
         bool prefsChanged = false;
-        if (cmdTarif     > 0 && cmdTarif     != tarif)             { tarif = cmdTarif; prefsChanged = true; }
-        if (cmdThreshold > 0 && cmdThreshold != overloadThreshold) {
-            setOverloadThreshold(cmdThreshold, "web command");
-        }
-        if (prefsChanged) savePrefs();
+        AppConfig nextConfig = appConfig;
+        if (cmdTarif     > 0 && cmdTarif     != appConfig.electricityCostPerKwh) { nextConfig.electricityCostPerKwh = cmdTarif; prefsChanged = true; }
+        if (cmdThreshold > 0 && cmdThreshold != appConfig.overloadThreshold)     { nextConfig.overloadThreshold = cmdThreshold; prefsChanged = true; }
+        if (prefsChanged) setAppConfig(nextConfig, "web command");
 
         sessionStartTs = 0;
         beginLoadCheck("web command START");

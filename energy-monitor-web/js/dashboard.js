@@ -32,11 +32,20 @@ setInterval(async () => {
   try {
     const snap = await get(settingsRef);
     const remote = snap.exists() ? { ...SETTING_DEFAULTS, ...snap.val() } : { ...settings };
-    const thresholdSnap = await get(ref(db, "config/threshold"));
-    if (thresholdSnap.exists()) {
-      const sharedThreshold = Number(thresholdSnap.val());
-      if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) {
-        remote.overloadThreshold = sharedThreshold;
+    const appConfigSnap = await get(ref(db, "config/app"));
+    if (appConfigSnap.exists()) {
+      const shared = appConfigSnap.val() || {};
+      const sharedThreshold = Number(shared.overloadThreshold ?? shared.threshold);
+      const sharedTariff = Number(shared.electricityCostPerKwh ?? shared.tariff ?? shared.tarif);
+      if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) remote.overloadThreshold = sharedThreshold;
+      if (Number.isFinite(sharedTariff) && sharedTariff > 0) remote.tariff = sharedTariff;
+    } else {
+      const thresholdSnap = await get(ref(db, "config/threshold"));
+      if (thresholdSnap.exists()) {
+        const sharedThreshold = Number(thresholdSnap.val());
+        if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) {
+          remote.overloadThreshold = sharedThreshold;
+        }
       }
     }
     if (JSON.stringify(remote) !== JSON.stringify(settings)) {

@@ -18,7 +18,7 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
                            unsigned long ts, bool recovered, bool wasOverload);
 
 // ── Config Sync ──────────────────────────────────────────────────
-void syncThresholdFromFirebase();
+void syncConfigFromFirebase();
 
 // ── Relay Command Poll ───────────────────────────────────────────
 void pollCommandFromFirebase();

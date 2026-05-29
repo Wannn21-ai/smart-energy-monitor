@@ -352,17 +352,31 @@ export async function loadAndApplySettings(uid) {
   }
 
   try {
-    const thresholdSnap = await get(ref(db, "config/threshold"));
-    if (thresholdSnap.exists()) {
-      const sharedThreshold = Number(thresholdSnap.val());
-      if (Number.isFinite(sharedThreshold) && sharedThreshold > 0 &&
-          sharedThreshold !== settings.overloadThreshold) {
-        settings = { ...settings, overloadThreshold: sharedThreshold };
+    const appSnap = await get(ref(db, "config/app"));
+    if (appSnap.exists()) {
+      const shared = appSnap.val() || {};
+      const sharedThreshold = Number(shared.overloadThreshold ?? shared.threshold);
+      const sharedTariff = Number(shared.electricityCostPerKwh ?? shared.tariff ?? shared.tarif);
+      const next = { ...settings };
+      if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) next.overloadThreshold = sharedThreshold;
+      if (Number.isFinite(sharedTariff) && sharedTariff > 0) next.tariff = sharedTariff;
+      if (JSON.stringify(next) !== JSON.stringify(settings)) {
+        settings = next;
         localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+      }
+    } else {
+      const thresholdSnap = await get(ref(db, "config/threshold"));
+      if (thresholdSnap.exists()) {
+        const sharedThreshold = Number(thresholdSnap.val());
+        if (Number.isFinite(sharedThreshold) && sharedThreshold > 0 &&
+            sharedThreshold !== settings.overloadThreshold) {
+          settings = { ...settings, overloadThreshold: sharedThreshold };
+          localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+        }
       }
     }
   } catch (e) {
-    console.warn("[SEM] Gagal load threshold global:", e);
+    console.warn("[SEM] Gagal load config global:", e);
   }
 
   return settings;

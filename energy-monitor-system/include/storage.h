@@ -2,7 +2,7 @@
 
 // ================================================================
 // storage.h — Smart Energy Monitor v3.1
-// LittleFS session/history dan Preferences (tarif, threshold, uid)
+// LittleFS session/history dan Preferences (config, uid)
 // ================================================================
 
 #include <Arduino.h>
@@ -29,7 +29,9 @@ struct PersistedSession {
 void loadPrefs();
 void savePrefs();
 void saveSessionId();
+bool setAppConfig(const AppConfig& next, const char* source = "");
 bool setOverloadThreshold(float threshold, const char* source = "");
+bool setElectricityCostPerKwh(float costPerKwh, const char* source = "");
 
 // ── LittleFS Init ────────────────────────────────────────────────
 bool fsInit();

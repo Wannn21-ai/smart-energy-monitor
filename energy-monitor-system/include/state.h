@@ -49,6 +49,12 @@ struct SessionData {
     SessionEndReason endReason;
 };
 
+struct AppConfig {
+    float overloadThreshold;
+    float electricityCostPerKwh;
+};
+
+extern AppConfig appConfig;
 extern SessionData sessionData;
 extern SystemMode systemMode;
 extern SessionState sessionState;
@@ -78,8 +84,6 @@ extern bool  overloadAlertLinger;
 extern unsigned long overloadLingerStart;
 
 // ── Session ──────────────────────────────────────────────────────
-extern float overloadThreshold;
-extern float tarif;
 extern float sessionEnergyWh;
 extern float sessionKwh;
 extern float sessionCost;

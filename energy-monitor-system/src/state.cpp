@@ -6,6 +6,11 @@
 #include "state.h"
 #include "config.h"
 
+AppConfig appConfig = {
+    THRESHOLD_DEFAULT,
+    TARIF_DEFAULT
+};
+
 SessionData sessionData = {
     0.0f,
     0.0f,
@@ -41,8 +46,6 @@ bool  overloadAlertLinger = false;
 unsigned long overloadLingerStart = 0;
 
 // ── Session ──────────────────────────────────────────────────────
-float overloadThreshold  = THRESHOLD_DEFAULT;
-float tarif              = TARIF_DEFAULT;
 float sessionEnergyWh    = 0.0f;
 float sessionKwh         = 0.0f;
 float sessionCost        = 0.0f;

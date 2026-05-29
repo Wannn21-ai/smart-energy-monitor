@@ -95,7 +95,7 @@ void oledData(float v, float i, float p, float pf, float hz,
     // ── Overload state ───────────────────────────────────────────
     if (ovl || overloadAlertLinger) {
         display.setCursor(10, 13); display.println("!! OVERLOAD !!");
-        display.setCursor(0,  23); display.printf("%.1fW >= %.0fW", lastP, overloadThreshold);
+        display.setCursor(0,  23); display.printf("%.1fW >= %.0fW", lastP, appConfig.overloadThreshold);
         display.setCursor(0,  33); display.println("Relay OFF");
         display.setCursor(0,  43); display.println("192.168.4.1");
         if (offline) {
@@ -107,7 +107,7 @@ void oledData(float v, float i, float p, float pf, float hz,
 
     if (overloadWarning) {
         display.setCursor(0, 13); display.println("WARN: Near overload");
-        display.setCursor(0, 23); display.printf("P:%.1fW / %.0fW", p, overloadThreshold);
+        display.setCursor(0, 23); display.printf("P:%.1fW / %.0fW", p, appConfig.overloadThreshold);
         display.setCursor(0, 33); display.println("Kurangi beban");
         display.drawLine(0, 43, 127, 43, WHITE);
         display.setCursor(0, 47); display.printf("E:%.4fkWh", kwh);

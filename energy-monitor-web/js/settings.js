@@ -114,19 +114,26 @@ async function saveSettingsToFirebase(partial) {
   }
 }
 
-async function syncSharedThresholdToSettings() {
+async function syncSharedConfigToSettings() {
   try {
-    const snap = await get(ref(db, "config/threshold"));
+    const snap = await get(ref(db, "config/app"));
     if (!snap.exists()) return;
-    const sharedThreshold = Number(snap.val());
-    if (!Number.isFinite(sharedThreshold) || sharedThreshold <= 0) return;
-    if (sharedThreshold === settings.overloadThreshold) return;
+    const shared = snap.val() || {};
+    const sharedThreshold = Number(shared.overloadThreshold ?? shared.threshold);
+    const sharedTariff = Number(shared.electricityCostPerKwh ?? shared.tariff ?? shared.tarif);
+    const next = { ...settings };
+    if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) next.overloadThreshold = sharedThreshold;
+    if (Number.isFinite(sharedTariff) && sharedTariff > 0) next.tariff = sharedTariff;
+    if (JSON.stringify(next) === JSON.stringify(settings)) return;
 
-    settings = { ...settings, overloadThreshold: sharedThreshold };
+    settings = next;
     localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
-    await update(ref(db, SETTINGS_PATH), { overloadThreshold: sharedThreshold });
+    await update(ref(db, SETTINGS_PATH), {
+      overloadThreshold: settings.overloadThreshold,
+      tariff: settings.tariff
+    });
   } catch (e) {
-    console.warn("[SEM] Gagal sync threshold global ke settings:", e);
+    console.warn("[SEM] Gagal sync config global ke settings:", e);
   }
 }
 
@@ -145,7 +152,7 @@ try {
 }
 
 applyToUI();
-await syncSharedThresholdToSettings();
+await syncSharedConfigToSettings();
 applyToUI();
 
 // ================= EVENT LISTENERS =================
@@ -178,10 +185,15 @@ document.getElementById("btn-save-settings").addEventListener("click", async () 
   try {
     await saveSettingsToFirebase({ currency, tariff, overloadThreshold: threshold });
     try {
+      await set(ref(db, "config/app"), {
+        overloadThreshold: threshold,
+        electricityCostPerKwh: tariff,
+        tariff
+      });
       await set(ref(db, "config/threshold"), threshold);
-      await update(ref(db, SETTINGS_PATH), { overloadThreshold: threshold });
+      await update(ref(db, SETTINGS_PATH), { overloadThreshold: threshold, tariff });
     } catch (e) {
-      console.warn("[SEM] Gagal sync threshold ke /config:", e);
+      console.warn("[SEM] Gagal sync config ke /config:", e);
     }
     showToast("Pengaturan tersimpan ✓", "success");
   } catch (e) {

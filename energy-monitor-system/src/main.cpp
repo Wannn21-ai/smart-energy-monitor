@@ -56,7 +56,9 @@ void setup() {
     // Load persisted values
     loadPrefs();
     Serial.printf("[Prefs] threshold=%.0fW tarif=%.2f uid=%s sessionId=%s\n",
-                  overloadThreshold, tarif, currentUid, currentSessionId);
+                  appConfig.overloadThreshold,
+                  appConfig.electricityCostPerKwh,
+                  currentUid, currentSessionId);
 
     // LittleFS
     fsInit();
@@ -91,7 +93,7 @@ void setup() {
         oledStatus("WiFi OK ✓", "Sync NTP...");
         ntpSynced = tryNTPSync();
         delay(500);
-        syncThresholdFromFirebase();
+        syncConfigFromFirebase();
         clearFirebaseCommand();
         doSessionRecovery((int)resetReason);
         fsSyncOfflineHistoryToFirebase();
@@ -167,7 +169,7 @@ void loop() {
             wifiLostSinceMs = 0;
             WiFi.setSleep(false);
             if (!ntpSynced) ntpSynced = tryNTPSync();
-            syncThresholdFromFirebase();
+            syncConfigFromFirebase();
             int pending = fsCountOfflineHistory();
             if (pending > 0) {
                 Serial.printf("[Reconnect] Syncing %d pending sessions\n", pending);
@@ -177,10 +179,10 @@ void loop() {
         }
     }
 
-    // ── Threshold sync (online) ───────────────────────────────────
+    // ── Config sync (online) ──────────────────────────────────────
     if (wifiConnected && (now - lastThresholdSyncMs >= THRESHOLD_SYNC_INTERVAL)) {
         lastThresholdSyncMs = now;
-        syncThresholdFromFirebase();
+        syncConfigFromFirebase();
     }
 
     // ── Command poll (online, non-offline mode) ───────────────────
@@ -236,7 +238,7 @@ void loop() {
     if (sessionActive && deviceConnected && relayOn && !isOverload) {
         sessionEnergyWh += power * dT;
         sessionKwh       = sessionEnergyWh / 1000.0f;
-        sessionCost      = sessionKwh * tarif;
+        sessionCost      = sessionKwh * appConfig.electricityCostPerKwh;
     }
 
     // Checkpoint

@@ -449,21 +449,22 @@ void handleDeviceDisconnect() {
 // ================================================================
 void handleOverload(float power) {
     bool canEvaluate = relayOn && sessionActive && deviceConnected && !overloadAlertLinger;
-    float warningAt = overloadThreshold > OVERLOAD_WARNING_MARGIN_W
-        ? overloadThreshold - OVERLOAD_WARNING_MARGIN_W
-        : overloadThreshold;
+    float threshold = appConfig.overloadThreshold;
+    float warningAt = threshold > OVERLOAD_WARNING_MARGIN_W
+        ? threshold - OVERLOAD_WARNING_MARGIN_W
+        : threshold;
 
-    bool warning = canEvaluate && power >= warningAt && power < overloadThreshold;
+    bool warning = canEvaluate && power >= warningAt && power < threshold;
     if (warning != overloadWarning) {
         overloadWarning = warning;
         warningBlinkState = false;
         digitalWrite(PIN_LED_RED, LOW);
         digitalWrite(PIN_BUZZER, LOW);
         Serial.printf("[Overload] Warning %s P=%.1fW threshold=%.0fW\n",
-                      overloadWarning ? "ON" : "OFF", power, overloadThreshold);
+                      overloadWarning ? "ON" : "OFF", power, threshold);
     }
 
-    bool newOvl = canEvaluate && (power >= overloadThreshold);
+    bool newOvl = canEvaluate && (power >= threshold);
     if (!newOvl) {
         if (!canEvaluate) overloadWarning = false;
         return;
@@ -473,7 +474,7 @@ void handleOverload(float power) {
     overloadWarning = false;
     sessionData.endReason = SESSION_END_OVERLOAD;
     setSessionState(SessionState::OVERLOAD, "power threshold exceeded");
-    Serial.printf("[Overload] %.1fW >= %.0fW - relay OFF immediately\n", power, overloadThreshold);
+    Serial.printf("[Overload] %.1fW >= %.0fW - relay OFF immediately\n", power, threshold);
 
     unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
     fsWriteSession();
