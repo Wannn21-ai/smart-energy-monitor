@@ -143,9 +143,11 @@ async function sendRelayCommand(type, payload = {}) {
     };
     await set(commandRef, command);
     console.log(`[Relay] Command ${on ? "ON" : "OFF"} → Firebase`);
+    return true;
   } catch (e) {
     console.error("[Relay] Gagal:", e);
     showToast("Gagal kirim perintah relay", "error");
+    return false;
   }
 }
 
@@ -500,21 +502,18 @@ function updateDisplay() {
   if (elFreq) elFreq.textContent = firebaseFreq > 0 ? firebaseFreq.toFixed(1) : "—";
   if (elApp)  elApp.textContent  = firebaseApparent > 0 ? firebaseApparent.toFixed(0) : "—";
 }
-function updateTimer() {
-  if (!startTime) return;
-  const d = Date.now() - startTime;
-  const h = String(Math.floor(d / 3600000)).padStart(2, "0");
-  const m = String(Math.floor((d % 3600000) / 60000)).padStart(2, "0");
-  const s = String(Math.floor((d % 60000) / 1000)).padStart(2, "0");
-  if (subDuration) subDuration.textContent = `Duration: ${h}:${m}:${s}`;
+function formatDurationSeconds(totalSeconds = 0) {
+  const secs = Math.max(0, Number(totalSeconds) || 0);
+  const h = String(Math.floor(secs / 3600)).padStart(2, "0");
+  const m = String(Math.floor((secs % 3600) / 60)).padStart(2, "0");
+  const s = String(Math.floor(secs % 60)).padStart(2, "0");
+  return `${h}:${m}:${s}`;
 }
 function getDuration() {
-  if (!startTime) return "00:00:00";
-  const d = Date.now() - startTime;
-  const h = String(Math.floor(d / 3600000)).padStart(2, "0");
-  const m = String(Math.floor((d % 3600000) / 60000)).padStart(2, "0");
-  const s = String(Math.floor((d % 60000) / 1000)).padStart(2, "0");
-  return `${h}:${m}:${s}`;
+  return formatDurationSeconds(firebaseElapsedSec);
+}
+function updateTimer() {
+  if (subDuration) subDuration.textContent = `Duration: ${getDuration()}`;
 }
 function setDeviceBadge(state) {
   if (!badgeStatus) return;
@@ -600,7 +599,10 @@ async function resetMonitoring() {
   if (subDuration)    subDuration.textContent    = "Duration: 00:00:00";
   if (valDeviceName)  valDeviceName.textContent  = "—";
   if (activeDevLabel) activeDevLabel.textContent = "No active device";
-  if (btnStop)        btnStop.style.display      = "none";
+  if (btnStop) {
+    btnStop.disabled = false;
+    btnStop.style.display = "none";
+  }
   setDeviceBadge("idle");
   setOverloadBanner(false);
   renderDeviceTabs();
@@ -628,7 +630,10 @@ async function startMonitoring(name) {
   await saveActiveSession({ ...activeDevice, startTime, energyBaseline });
   if (valDeviceName)  valDeviceName.textContent  = name;
   if (activeDevLabel) activeDevLabel.textContent = `Monitoring: ${name}`;
-  if (btnStop)        btnStop.style.display      = "inline-flex";
+  if (btnStop) {
+    btnStop.disabled = false;
+    btnStop.style.display = "inline-flex";
+  }
   setDeviceBadge("connected");
   clearInterval(timerInterval);
   timerInterval = setInterval(updateTimer, 1000);
@@ -674,7 +679,10 @@ async function alignActiveSessionFromEsp() {
     timerInterval = setInterval(updateTimer, 1000);
     if (valDeviceName)  valDeviceName.textContent  = activeDevice.name;
     if (activeDevLabel) activeDevLabel.textContent = `Monitoring: ${activeDevice.name}`;
-    if (btnStop)        btnStop.style.display      = "inline-flex";
+    if (btnStop) {
+      btnStop.disabled = false;
+      btnStop.style.display = "inline-flex";
+    }
     await saveActiveSession({ ...activeDevice, startTime, energyBaseline });
     await renderDeviceTabs();
     return true;
@@ -814,12 +822,13 @@ if (btnStop) {
     }
     // State migration point: MONITORING -> FINISHED; ESP32 keeps the source of truth.
     sessionState = SessionState.FINISHED;
-    await sendRelayCommand("STOP", {
+    const sent = await sendRelayCommand("STOP", {
       sessionId: activeDevice.id,
       reason: "USER_STOP"
     });
-    showToast("Sesi dihentikan — relay OFF ⏹", "");
-    await resetMonitoring();
+    if (!sent) return;
+    if (btnStop) btnStop.disabled = true;
+    showToast("Menunggu ESP32 menyimpan history...", "");
   });
 }
 
@@ -853,6 +862,7 @@ onValue(ref(db, "live"), snapshot => {
   firebaseEnergy   = dev.energy    || 0;
   firebaseCost     = dev.cost      || 0;
   firebaseOverload = dev.overload  === true;
+  updateTimer();
 
   if (firebaseSessionState !== SessionState.WAITING_LOAD &&
       current >= LOAD_MIN_CURRENT && firebasePower >= LOAD_MIN_POWER && firebaseEnergy > 0) {
@@ -1081,7 +1091,10 @@ if (savedActive && savedActive.id) {
   isRunning           = !!startTime;
   if (valDeviceName)  valDeviceName.textContent  = activeDevice.name;
   if (activeDevLabel) activeDevLabel.textContent = `Monitoring: ${activeDevice.name}`;
-  if (btnStop)        btnStop.style.display      = "inline-flex";
+  if (btnStop) {
+    btnStop.disabled = false;
+    btnStop.style.display = "inline-flex";
+  }
   if (startTime) {
     clearInterval(timerInterval);
     timerInterval = setInterval(updateTimer, 1000);

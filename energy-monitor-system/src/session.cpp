@@ -180,24 +180,26 @@ void handleLoadCheck(float current, float power) {
     }
 }
 
-static void archiveCurrentSession(unsigned long nowTs, float power, bool recovered, bool wasOverload,
+static bool archiveCurrentSession(const char* name, unsigned long startTs, unsigned long endTs,
+                                  float energyKwh, float cost, float power,
+                                  bool recovered, bool wasOverload,
                                   SessionEndReason endReason) {
-    if (strlen(sessionDeviceName) == 0) strlcpy(sessionDeviceName, "Device", sizeof(sessionDeviceName));
-    sessionData.endReason = endReason;
-    syncSessionDataFromLegacy(nowTs);
-    String dur = buildDuration(sessionStartTs, nowTs);
+    const char* safeName = name && strlen(name) > 0 ? name : "Device";
     const char* reasonText = sessionEndReasonToString(endReason);
 
-    fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                          sessionData.energy, sessionData.cost, power,
-                          wasOverload, reasonText, recovered);
+    bool saved = fsAppendOfflineHistory(safeName, startTs, endTs,
+                                        energyKwh, cost, power,
+                                        wasOverload, reasonText, recovered);
 
     if (wifiConnected && WiFi.status() == WL_CONNECTED) {
         bool ok = fsSyncOfflineHistoryToFirebase();
-        Serial.printf("[Session] History sync after finalize: %s\n", ok ? "OK" : "PENDING");
+        Serial.printf("[Session] History sync after finalize: %s pending=%d\n",
+                      ok ? "OK" : "PENDING", fsCountOfflineHistory());
     } else {
-        Serial.println("[Session] History saved locally, waiting for sync");
+        Serial.printf("[Session] History saved locally, waiting for sync pending=%d\n",
+                      fsCountOfflineHistory());
     }
+    return saved;
 }
 
 void finalizeSession(SessionEndReason reason, const char* source,
@@ -208,18 +210,36 @@ void finalizeSession(SessionEndReason reason, const char* source,
     const char* sourceText = source && strlen(source) > 0 ? source : reasonText;
     float snapshotPower = finalPower >= 0.0f ? finalPower : lastP;
     if (snapshotPower <= 0.0f && sessionData.power > 0.0f) snapshotPower = sessionData.power;
+    float snapshotEnergy = sessionKwh > 0.0f ? sessionKwh : sessionData.energy;
+    float snapshotCost = sessionCost > 0.0f ? sessionCost : sessionData.cost;
+    unsigned long snapshotStartTs = sessionStartTs;
+    unsigned long snapshotDuration = getSessionElapsedSec(nowTs);
+    char snapshotName[32];
+    strlcpy(snapshotName, strlen(sessionDeviceName) > 0 ? sessionDeviceName : sessionData.deviceName,
+            sizeof(snapshotName));
+    if (strlen(snapshotName) == 0) strlcpy(snapshotName, "Device", sizeof(snapshotName));
+
+    Serial.printf("[Session] finalizeSession reason=%s source=%s active=%d hadData=%d start=%lu duration=%lu P=%.1f E=%.4f cost=%.2f relay=%d pendingBefore=%d\n",
+                  reasonText, sourceText, sessionActive, hadDataOnce,
+                  snapshotStartTs, snapshotDuration, snapshotPower,
+                  snapshotEnergy, snapshotCost, relayOn, fsCountOfflineHistory());
 
     sessionData.endReason = reason;
     syncSessionDataFromLegacy(nowTs);
     setSessionState(SessionState::FINISHED, sourceText);
 
-    bool hasSessionData = sessionActive && hadDataOnce &&
-                          (sessionKwh > 0.0f || sessionEnergyWh > 0.0f || sessionData.energy > 0.0f);
+    bool hasSessionData = (sessionActive || sessionData.sessionActive) &&
+                          hadDataOnce && snapshotStartTs > 0;
     if (hasSessionData) {
-        archiveCurrentSession(nowTs, snapshotPower, recovered, wasOverload, reason);
+        bool saved = archiveCurrentSession(snapshotName, snapshotStartTs, nowTs,
+                                           snapshotEnergy, snapshotCost, snapshotPower,
+                                           recovered, wasOverload, reason);
+        Serial.printf("[Session] History write result=%s pendingAfter=%d\n",
+                      saved ? "OK" : "FAIL", fsCountOfflineHistory());
     } else {
-        Serial.printf("[Session] Finalize without history (%s): active=%d hadData=%d kWh=%.4f\n",
-                      reasonText, sessionActive, hadDataOnce, sessionKwh);
+        Serial.printf("[Session] Finalize without history (%s): active=%d dataActive=%d hadData=%d start=%lu kWh=%.4f\n",
+                      reasonText, sessionActive, sessionData.sessionActive,
+                      hadDataOnce, snapshotStartTs, snapshotEnergy);
     }
 
     if (turnRelayOff && relayOn) {

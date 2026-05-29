@@ -305,7 +305,16 @@ bool fsReadSession(PersistedSession &out) {
 // ================================================================
 // OFFLINE HISTORY — append entry
 // ================================================================
-void fsAppendOfflineHistory(const char* name, unsigned long startTs,
+static size_t fsHistoryFileSize() {
+    if (!LittleFS.exists(FS_HISTORY_PATH)) return 0;
+    File f = LittleFS.open(FS_HISTORY_PATH, "r");
+    if (!f) return 0;
+    size_t size = f.size();
+    f.close();
+    return size;
+}
+
+bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
                             unsigned long endTs, float energyKwh,
                             float cost, float avgPower, bool wasOverload,
                             const char* endReason, bool recovered) {
@@ -320,9 +329,28 @@ void fsAppendOfflineHistory(const char* name, unsigned long startTs,
             if (!err && doc.is<JsonArray>()) {
                 arr = doc.as<JsonArray>();
             } else {
+                Serial.printf("[FS] %s invalid, rebuilding history queue\n", FS_HISTORY_PATH);
                 doc.clear();
                 arr = doc.to<JsonArray>();
             }
+        }
+    }
+
+    const char* reasonText = endReason && strlen(endReason) > 0 ? endReason : "NORMAL_STOP";
+    for (JsonObject existing : arr) {
+        const char* existingSessionId = existing["sessionId"] | "";
+        unsigned long existingStart = existing["start_ts"] | (unsigned long)0;
+        const char* existingReason = existing["endReason"] | "";
+        bool sameSessionId = strlen(currentSessionId) > 0 &&
+                             strcmp(existingSessionId, currentSessionId) == 0;
+        bool sameFallback = strlen(currentSessionId) == 0 &&
+                            existingStart == startTs &&
+                            strcmp(existingReason, reasonText) == 0;
+        if (sameSessionId || sameFallback) {
+            Serial.printf("[FS] History duplicate skipped: '%s' reason=%s pending=%d size=%u\n",
+                          name, reasonText, (int)arr.size(),
+                          (unsigned)fsHistoryFileSize());
+            return true;
         }
     }
 
@@ -330,21 +358,31 @@ void fsAppendOfflineHistory(const char* name, unsigned long startTs,
     entry["name"]     = name;
     entry["start_ts"] = startTs;
     entry["end_ts"]   = endTs;
+    entry["duration"] = buildDuration(startTs, endTs);
     entry["kwh"]      = energyKwh;
+    entry["energy"]   = energyKwh;
     entry["cost"]     = cost;
     entry["power"]    = avgPower;
     entry["overload"] = wasOverload;
     entry["recovered"] = recovered;
     entry["pendingSync"] = true;
-    entry["endReason"] = endReason && strlen(endReason) > 0 ? endReason : "NORMAL_STOP";
+    entry["endReason"] = reasonText;
     entry["uid"]      = currentUid;
     entry["sessionId"] = currentSessionId;
 
     File f = LittleFS.open(FS_HISTORY_PATH, "w");
-    if (!f) { Serial.println("[FS] Gagal tulis offline history"); return; }
-    serializeJson(doc, f);
+    if (!f) {
+        Serial.println("[FS] Gagal tulis offline history");
+        return false;
+    }
+    size_t written = serializeJson(doc, f);
+    f.flush();
     f.close();
-    Serial.printf("[FS] Offline history: '%s' %.4f kWh disimpan\n", name, energyKwh);
+    bool ok = written > 0;
+    Serial.printf("[FS] History write %s: '%s' %.4f kWh reason=%s pending=%d size=%u\n",
+                  ok ? "OK" : "FAIL", name, energyKwh, reasonText,
+                  (int)arr.size(), (unsigned)fsHistoryFileSize());
+    return ok;
 }
 
 // ================================================================
@@ -364,6 +402,7 @@ bool fsSyncOfflineHistoryToFirebase() {
     if (err || !doc.is<JsonArray>()) {
         Serial.println("[FS] history_offline.json corrupt — hapus");
         LittleFS.remove(FS_HISTORY_PATH);
+        Serial.printf("[Sync] Pending cleared, pending=0 size=0\n");
         return true;
     }
 
@@ -373,7 +412,8 @@ bool fsSyncOfflineHistoryToFirebase() {
         return true;
     }
 
-    Serial.printf("[Sync] Mulai sync %d sesi offline ke Firebase\n", (int)arr.size());
+    Serial.printf("[Sync] Mulai sync %d sesi offline ke Firebase size=%u\n",
+                  (int)arr.size(), (unsigned)fsHistoryFileSize());
 
     int pushed = 0;
     for (JsonObject entry : arr) {
@@ -391,6 +431,11 @@ bool fsSyncOfflineHistoryToFirebase() {
 
         if (strlen(uid) > 0) strlcpy(currentUid, uid, sizeof(currentUid));
         if (strlen(sessId) > 0) strlcpy(currentSessionId, sessId, sizeof(currentSessionId));
+        if (strlen(currentUid) == 0) {
+            Serial.printf("[Sync] '%s' belum punya uid, tetap pending agar tidak hilang dari web history\n",
+                          name);
+            break;
+        }
 
         String dur = buildDuration(startTs, endTs);
         bool ok = pushHistoryToFirebase(name, dur.c_str(), avgPwr, kwh, cost,
@@ -406,6 +451,7 @@ bool fsSyncOfflineHistoryToFirebase() {
 
     if (pushed == (int)arr.size()) {
         LittleFS.remove(FS_HISTORY_PATH);
+        Serial.printf("[Sync] Pending cleared, pending=0 size=0\n");
         Serial.printf("[Sync] ✓ Semua %d sesi berhasil di-sync\n", pushed);
         return true;
     }
@@ -419,7 +465,9 @@ bool fsSyncOfflineHistoryToFirebase() {
             idx++;
         }
         File fw = LittleFS.open(FS_HISTORY_PATH, "w");
-        if (fw) { serializeJson(newDoc, fw); fw.close(); }
+        if (fw) { serializeJson(newDoc, fw); fw.flush(); fw.close(); }
+        Serial.printf("[Sync] Pending setelah sync=%d size=%u\n",
+                      (int)newArr.size(), (unsigned)fsHistoryFileSize());
         Serial.printf("[Sync] %d/%d berhasil, sisanya disimpan\n", pushed, (int)arr.size());
     }
     return false;

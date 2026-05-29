@@ -87,6 +87,10 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
                            unsigned long ts, bool recovered, bool wasOverload,
                            const char* endReason) {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
+    if (strlen(currentUid) == 0) {
+        Serial.println("[History] Push ditahan: uid kosong, history tetap pending lokal");
+        return false;
+    }
 
     char dateStr[20] = "—";
     if (ntpSynced && ts > 1000000) {
@@ -116,13 +120,11 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
                  name, recovered ? " Recovered" : "");
     }
 
-    unsigned long historyKey = (unsigned long)(ts * 1000UL);
+    unsigned long long historyKey = (unsigned long long)ts * 1000ULL;
+    char historyKeyStr[24];
+    snprintf(historyKeyStr, sizeof(historyKeyStr), "%llu", historyKey);
     char path[192];
-    if (strlen(currentUid) > 0) {
-        snprintf(path, sizeof(path), "/users/%s/history/%lu.json", currentUid, historyKey);
-    } else {
-        snprintf(path, sizeof(path), "/shared_history/%lu.json", historyKey);
-    }
+    snprintf(path, sizeof(path), "/users/%s/history/%s.json", currentUid, historyKeyStr);
 
     WiFiClientSecure c; c.setInsecure(); c.setTimeout(10000);
     HTTPClient h;
@@ -138,11 +140,11 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
     snprintf(body, sizeof(body),
         "{\"name\":\"%s\",\"duration\":\"%s\",\"power\":%.1f,"
         "\"energy\":%.4f,\"cost\":\"%s\",\"date\":\"%s\","
-        "\"timestamp\":%lu,\"isOverload\":%s,\"recovered\":%s,"
+        "\"timestamp\":%s,\"isOverload\":%s,\"recovered\":%s,"
         "\"sessionId\":\"%s\",\"endReason\":\"%s\"}",
         safeName.c_str(), safeDuration.c_str(), avgPower,
         energyKwh, costStr, dateStr,
-        historyKey,
+        historyKeyStr,
         wasOverload ? "true" : "false",
         recovered   ? "true" : "false",
         safeSessionId.c_str(),
@@ -150,6 +152,8 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
 
     int code = h.PUT(body);
     h.end();
+    Serial.printf("[History] Firebase target /users/%s/history/%s endReason=%s\n",
+                  currentUid, historyKeyStr, safeEndReason.c_str());
     Serial.printf("[History] Push '%s' → %d\n", displayName, code);
     return (code == 200 || code == 204);
 }
