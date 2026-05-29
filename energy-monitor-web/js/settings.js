@@ -114,6 +114,22 @@ async function saveSettingsToFirebase(partial) {
   }
 }
 
+async function syncSharedThresholdToSettings() {
+  try {
+    const snap = await get(ref(db, "config/threshold"));
+    if (!snap.exists()) return;
+    const sharedThreshold = Number(snap.val());
+    if (!Number.isFinite(sharedThreshold) || sharedThreshold <= 0) return;
+    if (sharedThreshold === settings.overloadThreshold) return;
+
+    settings = { ...settings, overloadThreshold: sharedThreshold };
+    localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+    await update(ref(db, SETTINGS_PATH), { overloadThreshold: sharedThreshold });
+  } catch (e) {
+    console.warn("[SEM] Gagal sync threshold global ke settings:", e);
+  }
+}
+
 // ================= LOAD SETTINGS =================
 // Baru load & apply SETELAH semua fungsi di atas terdefinisi
 try {
@@ -128,6 +144,8 @@ try {
   applyLanguage(settings.language);
 }
 
+applyToUI();
+await syncSharedThresholdToSettings();
 applyToUI();
 
 // ================= EVENT LISTENERS =================
@@ -161,6 +179,7 @@ document.getElementById("btn-save-settings").addEventListener("click", async () 
     await saveSettingsToFirebase({ currency, tariff, overloadThreshold: threshold });
     try {
       await set(ref(db, "config/threshold"), threshold);
+      await update(ref(db, SETTINGS_PATH), { overloadThreshold: threshold });
     } catch (e) {
       console.warn("[SEM] Gagal sync threshold ke /config:", e);
     }

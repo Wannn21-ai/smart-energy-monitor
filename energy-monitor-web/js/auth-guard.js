@@ -351,6 +351,20 @@ export async function loadAndApplySettings(uid) {
     console.warn("[SEM] Gagal load settings dari Firebase:", e);
   }
 
+  try {
+    const thresholdSnap = await get(ref(db, "config/threshold"));
+    if (thresholdSnap.exists()) {
+      const sharedThreshold = Number(thresholdSnap.val());
+      if (Number.isFinite(sharedThreshold) && sharedThreshold > 0 &&
+          sharedThreshold !== settings.overloadThreshold) {
+        settings = { ...settings, overloadThreshold: sharedThreshold };
+        localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+      }
+    }
+  } catch (e) {
+    console.warn("[SEM] Gagal load threshold global:", e);
+  }
+
   return settings;
 }
 

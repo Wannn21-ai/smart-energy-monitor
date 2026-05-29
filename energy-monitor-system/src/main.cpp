@@ -24,6 +24,7 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <PZEM004Tv30.h>
+#include <esp_system.h>
 
 // ── Hardware objects (hanya didefinisikan di sini) ───────────────
 HardwareSerial pzemSerial(2);
@@ -36,6 +37,8 @@ void setup() {
     Serial.begin(115200);
     delay(100);
     Serial.println("\n[Boot] Smart Energy Monitor v3.1");
+    esp_reset_reason_t resetReason = esp_reset_reason();
+    Serial.printf("[Boot] Reset reason: %d\n", (int)resetReason);
 
     // GPIO init
     pinMode(PIN_LED_BLUE,   OUTPUT); pinMode(PIN_LED_GREEN,  OUTPUT);
@@ -90,7 +93,7 @@ void setup() {
         delay(500);
         syncThresholdFromFirebase();
         clearFirebaseCommand();
-        doSessionRecovery();
+        doSessionRecovery((int)resetReason);
         fsSyncOfflineHistoryToFirebase();
 
         unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
@@ -109,7 +112,7 @@ void setup() {
         lastModeTransitionMs = millis();
         setSystemMode(SystemMode::OFFLINE, "boot wifi unavailable");
 
-        doSessionRecovery();
+        doSessionRecovery((int)resetReason);
 
         lastReconnectMs = millis();
         oledStatus("Offline Mode ✓", relayOn ? sessionDeviceName : "Idle");
@@ -170,10 +173,7 @@ void loop() {
                 Serial.printf("[Reconnect] Syncing %d pending sessions\n", pending);
                 fsSyncOfflineHistoryToFirebase();
             }
-            unsigned long ts = ntpSynced ? (unsigned long)time(nullptr) : now / 1000;
-            sendToFirebase(lastV, lastI, lastP, lastPF, lastHz,
-                           sessionKwh, sessionCost,
-                           deviceConnected, isOverload, relayOn, ts);
+            handleReconnectResync();
         }
     }
 

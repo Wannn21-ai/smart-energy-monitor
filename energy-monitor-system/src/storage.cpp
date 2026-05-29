@@ -17,6 +17,72 @@
 
 static Preferences prefs;
 
+static const char* FS_SESSION_TMP_PATH = "/session_active.tmp";
+static const char* FS_SESSION_BAK_PATH = "/session_active.bak";
+
+static SessionState sessionStateFromString(const char* value) {
+    if (!value) return SessionState::IDLE;
+    if (strcmp(value, "WAITING_LOAD") == 0) return SessionState::WAITING_LOAD;
+    if (strcmp(value, "MONITORING") == 0) return SessionState::MONITORING;
+    if (strcmp(value, "OVERLOAD") == 0) return SessionState::OVERLOAD;
+    if (strcmp(value, "FINISHED") == 0) return SessionState::FINISHED;
+    return SessionState::IDLE;
+}
+
+static SystemMode systemModeFromString(const char* value) {
+    if (!value) return SystemMode::ONLINE;
+    if (strcmp(value, "OFFLINE") == 0) return SystemMode::OFFLINE;
+    if (strcmp(value, "TRANSITION") == 0) return SystemMode::TRANSITION;
+    return SystemMode::ONLINE;
+}
+
+static bool validateJsonFile(const char* path) {
+    File f = LittleFS.open(path, "r");
+    if (!f) return false;
+    StaticJsonDocument<1024> doc;
+    DeserializationError err = deserializeJson(doc, f);
+    f.close();
+    return !err && (doc["committed"] | false);
+}
+
+template <size_t N>
+static bool commitSessionCheckpoint(StaticJsonDocument<N> &doc) {
+    if (LittleFS.exists(FS_SESSION_TMP_PATH)) LittleFS.remove(FS_SESSION_TMP_PATH);
+
+    File f = LittleFS.open(FS_SESSION_TMP_PATH, "w");
+    if (!f) {
+        Serial.println("[FS] ✗ Gagal buka temp checkpoint");
+        return false;
+    }
+
+    size_t n = serializeJson(doc, f);
+    f.flush();
+    f.close();
+    if (n == 0 || !validateJsonFile(FS_SESSION_TMP_PATH)) {
+        LittleFS.remove(FS_SESSION_TMP_PATH);
+        Serial.println("[FS] ✗ Temp checkpoint invalid");
+        return false;
+    }
+
+    if (LittleFS.exists(FS_SESSION_BAK_PATH)) LittleFS.remove(FS_SESSION_BAK_PATH);
+    if (LittleFS.exists(FS_SESSION_PATH) &&
+        !LittleFS.rename(FS_SESSION_PATH, FS_SESSION_BAK_PATH)) {
+        LittleFS.remove(FS_SESSION_TMP_PATH);
+        Serial.println("[FS] ✗ Gagal backup checkpoint lama");
+        return false;
+    }
+
+    if (!LittleFS.rename(FS_SESSION_TMP_PATH, FS_SESSION_PATH)) {
+        if (LittleFS.exists(FS_SESSION_BAK_PATH)) {
+            LittleFS.rename(FS_SESSION_BAK_PATH, FS_SESSION_PATH);
+        }
+        Serial.println("[FS] ✗ Gagal commit checkpoint");
+        return false;
+    }
+
+    return true;
+}
+
 // ================================================================
 // PREFERENCES
 // ================================================================
@@ -44,6 +110,18 @@ void saveSessionId() {
     Serial.printf("[Prefs] Saved uid=%s sessionId=%s\n", currentUid, currentSessionId);
 }
 
+bool setOverloadThreshold(float threshold, const char* source) {
+    if (threshold <= 0.0f || threshold > 10000.0f) return false;
+    if (threshold == overloadThreshold) return true;
+
+    overloadThreshold = threshold;
+    savePrefs();
+    Serial.printf("[Prefs] Threshold %.0fW (%s)\n",
+                  overloadThreshold,
+                  source && strlen(source) > 0 ? source : "update");
+    return true;
+}
+
 // ================================================================
 // LittleFS INIT
 // ================================================================
@@ -56,6 +134,14 @@ bool fsInit() {
         }
     }
     Serial.println("[FS] LittleFS OK");
+    if (LittleFS.exists(FS_SESSION_TMP_PATH)) {
+        LittleFS.remove(FS_SESSION_TMP_PATH);
+        Serial.println("[FS] Temp checkpoint dibersihkan");
+    }
+    if (!LittleFS.exists(FS_SESSION_PATH) && LittleFS.exists(FS_SESSION_BAK_PATH)) {
+        LittleFS.rename(FS_SESSION_BAK_PATH, FS_SESSION_PATH);
+        Serial.println("[FS] Checkpoint backup dipulihkan");
+    }
     return true;
 }
 
@@ -68,30 +154,40 @@ bool fsWriteSession() {
 
     if (!sessionData.sessionActive || strlen(sessionData.deviceName) == 0) return false;
 
-    StaticJsonDocument<384> doc;
-    doc["name"]      = sessionData.deviceName;
-    doc["start"]     = sessionStartTs;
-    doc["elapsed"]   = sessionData.duration;
-    doc["energy_wh"] = sessionData.energy * 1000.0f;
-    doc["kwh"]       = sessionData.energy;
-    doc["cost"]      = sessionData.cost;
-    doc["relay"]     = relayOn;
-    doc["uid"]       = currentUid;
-    doc["sessionId"] = currentSessionId;
+    StaticJsonDocument<1024> doc;
+    doc["schema"]        = 2;
+    doc["committed"]     = true;
+    doc["saved_ms"]      = millis();
+    doc["name"]          = sessionData.deviceName;
+    doc["start"]         = sessionStartTs;
+    doc["elapsed"]       = sessionData.duration;
+    doc["energy_wh"]     = sessionData.energy * 1000.0f;
+    doc["kwh"]           = sessionData.energy;
+    doc["cost"]          = sessionData.cost;
+    doc["sessionActive"] = sessionData.sessionActive;
+    doc["relay"]         = relayOn;
+    doc["overload"]      = sessionData.overload;
+    doc["offline"]       = (sessionData.mode == SESSION_MODE_OFFLINE);
+    doc["mode"]          = (sessionData.mode == SESSION_MODE_OFFLINE) ? "OFFLINE" : "ONLINE";
+    doc["systemMode"]    = systemModeToString(systemMode);
+    doc["sessionState"]  = sessionStateToString(sessionState);
+    doc["uid"]           = currentUid;
+    doc["sessionId"]     = currentSessionId;
 
-    File f = LittleFS.open(FS_SESSION_PATH, "w");
-    if (!f) {
-        Serial.println("[FS] ✗ Gagal buka session file");
+    if (doc.overflowed()) {
+        Serial.println("[FS] Checkpoint JSON overflow");
         return false;
     }
-    size_t n = serializeJson(doc, f);
-    f.close();
-    if (n == 0) {
-        Serial.println("[FS] ✗ Gagal serialize session");
-        return false;
-    }
-    Serial.printf("[FS] ✓ Checkpoint: %s %.4f kWh\n", sessionData.deviceName, sessionData.energy);
+
+    if (!commitSessionCheckpoint(doc)) return false;
+
+    Serial.printf("[FS] Checkpoint: %s %.4f kWh %lus %s/%s\n",
+                  sessionData.deviceName, sessionData.energy,
+                  sessionData.duration,
+                  systemModeToString(systemMode),
+                  sessionStateToString(sessionState));
     return true;
+
 }
 
 // ================================================================
@@ -102,46 +198,75 @@ void fsClearSession() {
         LittleFS.remove(FS_SESSION_PATH);
         Serial.println("[FS] session_active.json dihapus");
     }
+    if (LittleFS.exists(FS_SESSION_TMP_PATH)) LittleFS.remove(FS_SESSION_TMP_PATH);
+    if (LittleFS.exists(FS_SESSION_BAK_PATH)) LittleFS.remove(FS_SESSION_BAK_PATH);
 }
 
 // ================================================================
 // SESSION FILE — read
 // ================================================================
-bool fsReadSession(float &outEnergyWh, float &outKwh, float &outCost,
-                   char *outName, unsigned long &outStartTs,
-                   unsigned long &outElapsedSec) {
-    if (!LittleFS.exists(FS_SESSION_PATH)) return false;
+static bool readSessionFromPath(const char* path, PersistedSession &out) {
+    if (!LittleFS.exists(path)) return false;
 
-    File f = LittleFS.open(FS_SESSION_PATH, "r");
+    File f = LittleFS.open(path, "r");
     if (!f) return false;
 
-    StaticJsonDocument<256> doc;
+    StaticJsonDocument<1024> doc;
     DeserializationError err = deserializeJson(doc, f);
     f.close();
 
     if (err) {
-        Serial.printf("[FS] JSON error: %s\n", err.c_str());
-        LittleFS.remove(FS_SESSION_PATH);
+        Serial.printf("[FS] JSON error %s: %s\n", path, err.c_str());
         return false;
     }
 
-    outEnergyWh = doc["energy_wh"] | 0.0f;
-    outKwh      = doc["kwh"]       | 0.0f;
-    outCost     = doc["cost"]      | 0.0f;
-    outStartTs  = doc["start"]     | (unsigned long)0;
-    outElapsedSec = doc["elapsed"] | (unsigned long)0;
-    strlcpy(outName, doc["name"] | "Recovered", 32);
+    bool committed = doc["committed"] | true;
+    if (!committed) return false;
 
-    const char* savedUid  = doc["uid"]       | "";
-    const char* savedSess = doc["sessionId"] | "";
-    if (strlen(savedUid)  > 0) strlcpy(currentUid,       savedUid,  sizeof(currentUid));
-    if (strlen(savedSess) > 0) strlcpy(currentSessionId, savedSess, sizeof(currentSessionId));
+    out.energyWh      = doc["energy_wh"]     | 0.0f;
+    out.kwh           = doc["kwh"]           | 0.0f;
+    out.cost          = doc["cost"]          | 0.0f;
+    out.startTs       = doc["start"]         | (unsigned long)0;
+    out.elapsedSec    = doc["elapsed"]       | (unsigned long)0;
+    out.sessionActive = doc["sessionActive"] | true;
+    out.relay         = doc["relay"]         | true;
+    out.overload      = doc["overload"]      | false;
+    out.offlineMode   = doc["offline"]       | false;
+    out.sessionState  = sessionStateFromString(doc["sessionState"] | "MONITORING");
+    out.systemMode    = systemModeFromString(doc["systemMode"] | (out.offlineMode ? "OFFLINE" : "ONLINE"));
+    strlcpy(out.name,      doc["name"]      | "Recovered", sizeof(out.name));
+    strlcpy(out.uid,       doc["uid"]       | "",          sizeof(out.uid));
+    strlcpy(out.sessionId, doc["sessionId"] | "",          sizeof(out.sessionId));
 
-    if (outKwh <= 0 && outEnergyWh <= 0) {
-        LittleFS.remove(FS_SESSION_PATH);
-        return false;
+    return out.sessionActive && strlen(out.name) > 0;
+}
+
+bool fsReadSession(PersistedSession &out) {
+    memset(&out, 0, sizeof(out));
+    out.sessionState = SessionState::IDLE;
+    out.systemMode = SystemMode::ONLINE;
+
+    if (readSessionFromPath(FS_SESSION_PATH, out)) {
+        if (strlen(out.uid) > 0) strlcpy(currentUid, out.uid, sizeof(currentUid));
+        if (strlen(out.sessionId) > 0) strlcpy(currentSessionId, out.sessionId, sizeof(currentSessionId));
+        return true;
     }
-    return true;
+
+    if (LittleFS.exists(FS_SESSION_PATH)) {
+        LittleFS.remove(FS_SESSION_PATH);
+    }
+
+    if (readSessionFromPath(FS_SESSION_BAK_PATH, out)) {
+        Serial.println("[FS] Checkpoint utama invalid, pakai backup");
+        if (strlen(out.uid) > 0) strlcpy(currentUid, out.uid, sizeof(currentUid));
+        if (strlen(out.sessionId) > 0) strlcpy(currentSessionId, out.sessionId, sizeof(currentSessionId));
+        return true;
+    }
+
+    if (LittleFS.exists(FS_SESSION_BAK_PATH)) {
+        LittleFS.remove(FS_SESSION_BAK_PATH);
+    }
+    return false;
 }
 
 // ================================================================

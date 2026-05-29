@@ -31,14 +31,19 @@ settings = await loadAndApplySettings(uid);
 setInterval(async () => {
   try {
     const snap = await get(settingsRef);
-    if (snap.exists()) {
-      const remote = { ...SETTING_DEFAULTS, ...snap.val() };
-      if (JSON.stringify(remote) !== JSON.stringify(settings)) {
-        settings = remote;
-        localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
-        applyTheme(settings.theme);
-        startMetersInterval();
+    const remote = snap.exists() ? { ...SETTING_DEFAULTS, ...snap.val() } : { ...settings };
+    const thresholdSnap = await get(ref(db, "config/threshold"));
+    if (thresholdSnap.exists()) {
+      const sharedThreshold = Number(thresholdSnap.val());
+      if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) {
+        remote.overloadThreshold = sharedThreshold;
       }
+    }
+    if (JSON.stringify(remote) !== JSON.stringify(settings)) {
+      settings = remote;
+      localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
+      applyTheme(settings.theme);
+      startMetersInterval();
     }
   } catch {}
 }, 10000);

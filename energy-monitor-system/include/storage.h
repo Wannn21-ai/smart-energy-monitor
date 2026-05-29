@@ -6,11 +6,30 @@
 // ================================================================
 
 #include <Arduino.h>
+#include "state.h"
+
+struct PersistedSession {
+    float energyWh;
+    float kwh;
+    float cost;
+    unsigned long startTs;
+    unsigned long elapsedSec;
+    bool sessionActive;
+    bool relay;
+    bool overload;
+    bool offlineMode;
+    SessionState sessionState;
+    SystemMode systemMode;
+    char name[32];
+    char uid[64];
+    char sessionId[48];
+};
 
 // ── Preferences ──────────────────────────────────────────────────
 void loadPrefs();
 void savePrefs();
 void saveSessionId();
+bool setOverloadThreshold(float threshold, const char* source = "");
 
 // ── LittleFS Init ────────────────────────────────────────────────
 bool fsInit();
@@ -18,9 +37,7 @@ bool fsInit();
 // ── Session File ─────────────────────────────────────────────────
 bool fsWriteSession();
 void fsClearSession();
-bool fsReadSession(float &outEnergyWh, float &outKwh, float &outCost,
-                   char *outName, unsigned long &outStartTs,
-                   unsigned long &outElapsedSec);
+bool fsReadSession(PersistedSession &out);
 
 // ── Offline History Queue ────────────────────────────────────────
 void fsAppendOfflineHistory(const char* name, unsigned long startTs,

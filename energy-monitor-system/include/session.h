@@ -14,13 +14,14 @@ void setRelay(bool on, const char* reason = "");
 // ── Mode Transitions ─────────────────────────────────────────────
 void transitionToOnlineMode();
 void transitionToOfflineMode(const char* reason = "");
+void handleReconnectResync();
 
 // ── Offline Session ──────────────────────────────────────────────
 void startOfflineSession(const char* reason);
 void generateOfflineDeviceName();
 
 // ── Session Recovery (dipanggil saat boot) ──────────────────────
-void doSessionRecovery();
+void doSessionRecovery(int resetReason);
 void handleRecoveredSessionCheck();
 
 // ── Device Disconnect & Overload ─────────────────────────────────

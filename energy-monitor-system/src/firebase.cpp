@@ -109,6 +109,11 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
     else
         strlcpy(displayName, name, sizeof(displayName));
 
+    if (wasOverload) {
+        snprintf(displayName, sizeof(displayName), "%s [OVERLOAD]%s",
+                 name, recovered ? " Recovered" : "");
+    }
+
     unsigned long historyKey = (unsigned long)(ts * 1000UL);
     char path[192];
     if (strlen(currentUid) > 0) {
@@ -157,8 +162,7 @@ void syncThresholdFromFirebase() {
         if (pl != "null" && pl.length() > 0) {
             float v = pl.toFloat();
             if (v > 0 && v != overloadThreshold) {
-                overloadThreshold = v;
-                savePrefs();
+                setOverloadThreshold(v, "firebase config");
                 Serial.printf("[Threshold] Updated: %.0fW\n", v);
             }
         }
@@ -231,7 +235,7 @@ void pollCommandFromFirebase() {
     if (cmdStart && !relayOn) {
         sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
         hadDataOnce = false; disconnectCount = 0;
-        isOverload = false; overloadAlertLinger = false;
+        isOverload = false; overloadWarning = false; overloadAlertLinger = false;
 
         if (strlen(cmdUid)       > 0) strlcpy(currentUid,       cmdUid,       sizeof(currentUid));
         if (strlen(cmdSessionId) > 0) strlcpy(currentSessionId, cmdSessionId, sizeof(currentSessionId));
@@ -241,8 +245,10 @@ void pollCommandFromFirebase() {
         else if (strlen(sessionDeviceName) == 0) strlcpy(sessionDeviceName, "Device", sizeof(sessionDeviceName));
 
         bool prefsChanged = false;
-        if (cmdTarif     > 0 && cmdTarif     != tarif)             { tarif             = cmdTarif;     prefsChanged = true; }
-        if (cmdThreshold > 0 && cmdThreshold != overloadThreshold) { overloadThreshold = cmdThreshold; prefsChanged = true; }
+        if (cmdTarif     > 0 && cmdTarif     != tarif)             { tarif = cmdTarif; prefsChanged = true; }
+        if (cmdThreshold > 0 && cmdThreshold != overloadThreshold) {
+            setOverloadThreshold(cmdThreshold, "web command");
+        }
         if (prefsChanged) savePrefs();
 
         sessionStartTs = 0;

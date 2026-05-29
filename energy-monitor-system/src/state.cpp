@@ -35,6 +35,7 @@ bool  relayOn         = false;
 bool  deviceConnected = false;
 bool  prevDevConn     = false;
 bool  isOverload      = false;
+bool  overloadWarning = false;
 int   disconnectCount = 0;
 bool  overloadAlertLinger = false;
 unsigned long overloadLingerStart = 0;
@@ -75,6 +76,8 @@ unsigned long lastBlinkMs             = 0;
 bool          blinkState              = false;
 unsigned long lastOverloadBlinkMs     = 0;
 bool          overloadBlinkState      = false;
+unsigned long lastWarningBlinkMs      = 0;
+bool          warningBlinkState       = false;
 
 const char* systemModeToString(SystemMode mode) {
     switch (mode) {

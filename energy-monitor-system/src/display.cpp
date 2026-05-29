@@ -105,6 +105,19 @@ void oledData(float v, float i, float p, float pf, float hz,
         return;
     }
 
+    if (overloadWarning) {
+        display.setCursor(0, 13); display.println("WARN: Near overload");
+        display.setCursor(0, 23); display.printf("P:%.1fW / %.0fW", p, overloadThreshold);
+        display.setCursor(0, 33); display.println("Kurangi beban");
+        display.drawLine(0, 43, 127, 43, WHITE);
+        display.setCursor(0, 47); display.printf("E:%.4fkWh", kwh);
+        display.setCursor(0, 57);
+        if (cost >= 1000) display.printf("Rp %lu",  (unsigned long)cost);
+        else              display.printf("Rp %.1f", cost);
+        display.display();
+        return;
+    }
+
     // ── Relay OFF state ──────────────────────────────────────────
     if (!relay) {
         display.setCursor(10, 20); display.println("Relay OFF");
@@ -189,9 +202,19 @@ void handleOverloadAlert() {
     }
     bool active = isOverload || overloadAlertLinger;
     if (!active) {
+        if (overloadWarning) {
+            if (millis() - lastWarningBlinkMs >= OVERLOAD_WARNING_BLINK_MS) {
+                warningBlinkState = !warningBlinkState;
+                digitalWrite(PIN_LED_RED, warningBlinkState ? HIGH : LOW);
+                digitalWrite(PIN_BUZZER,  warningBlinkState ? HIGH : LOW);
+                lastWarningBlinkMs = millis();
+            }
+            return;
+        }
         digitalWrite(PIN_LED_RED, LOW);
         digitalWrite(PIN_BUZZER,  LOW);
         overloadBlinkState = false;
+        warningBlinkState = false;
         return;
     }
     if (millis() - lastOverloadBlinkMs >= OVERLOAD_BLINK_MS) {

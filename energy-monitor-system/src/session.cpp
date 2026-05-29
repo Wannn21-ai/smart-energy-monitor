@@ -13,6 +13,7 @@
 
 #include <WiFi.h>
 #include <time.h>
+#include <esp_system.h>
 
 // ================================================================
 // UTILITY HELPERS
@@ -45,6 +46,27 @@ String jsonEscape(const char* s) {
     return out;
 }
 
+static const char* resetReasonToString(int reason) {
+    switch ((esp_reset_reason_t)reason) {
+        case ESP_RST_POWERON:   return "POWERON";
+        case ESP_RST_EXT:       return "EXT";
+        case ESP_RST_SW:        return "SW";
+        case ESP_RST_PANIC:     return "PANIC";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "UNKNOWN";
+    }
+}
+
+static bool isBlackoutReset(int reason) {
+    esp_reset_reason_t reset = (esp_reset_reason_t)reason;
+    return reset == ESP_RST_POWERON || reset == ESP_RST_BROWNOUT;
+}
+
 // ================================================================
 // RELAY — single entry point, atomic state update
 // ================================================================
@@ -64,6 +86,7 @@ void setRelay(bool on, const char* reason) {
     }
 
     if (!on) {
+        overloadWarning = false;
         sessionActive = false;
         loadCheckPending = false;
         loadCheckStartedMs = 0;
@@ -170,6 +193,48 @@ static void archiveCurrentSession(unsigned long nowTs, float power, bool recover
     }
 }
 
+static void clearFinishedSession(const char* reason) {
+    setRelay(false, reason);
+    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
+    hadDataOnce = false; prevDevConn = false; disconnectCount = 0;
+    sessionDeviceName[0] = '\0';
+    currentSessionId[0] = '\0';
+    saveSessionId();
+}
+
+static bool finalizeMissingLoadOnReconnect(unsigned long nowTs) {
+    if (!relayOn || !sessionActive || !hadDataOnce || deviceConnected) return false;
+    if (loadCheckPending || recoveredSessionPending) return false;
+    if (!prevDevConn && disconnectCount == 0) return false;
+
+    Serial.println("[Reconnect] Load missing, finalizing active session");
+    archiveCurrentSession(nowTs, lastP, false, false);
+    clearFinishedSession("load missing after reconnect");
+    syncSessionDataFromLegacy(nowTs);
+    sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, false, false, nowTs);
+    return true;
+}
+
+void handleReconnectResync() {
+    if (!wifiConnected || WiFi.status() != WL_CONNECTED) return;
+
+    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+
+    if (finalizeMissingLoadOnReconnect(nowTs)) {
+        return;
+    }
+
+    if (sessionActive && hadDataOnce) {
+        fsWriteSession();
+    }
+
+    syncSessionDataFromLegacy(nowTs);
+    bool ok = sendToFirebase(lastV, lastI, lastP, lastPF, lastHz,
+                             sessionKwh, sessionCost,
+                             deviceConnected, isOverload, relayOn, nowTs);
+    Serial.printf("[Reconnect] Live mirror resync: %s\n", ok ? "OK" : "FAIL");
+}
+
 void transitionToOnlineMode() {
     if (!modeOffline) return;
 
@@ -243,6 +308,7 @@ void startOfflineSession(const char* reason) {
     prevDevConn         = false;
     disconnectCount     = 0;
     isOverload          = false;
+    overloadWarning     = false;
     overloadAlertLinger = false;
     currentSessionId[0] = '\0';
 
@@ -270,42 +336,52 @@ void generateOfflineDeviceName() {
 // ================================================================
 // SESSION RECOVERY (dipanggil saat boot)
 // ================================================================
-void doSessionRecovery() {
-    float recoveredEnergyWh = 0, recoveredKwh = 0, recoveredCost = 0;
-    char  recoveredName[32] = "";
-    unsigned long recoveredStartTs = 0;
-    unsigned long recoveredElapsedSec = 0;
+void doSessionRecovery(int resetReason) {
+    PersistedSession recovered;
 
-    if (!fsReadSession(recoveredEnergyWh, recoveredKwh, recoveredCost,
-                       recoveredName, recoveredStartTs, recoveredElapsedSec)) return;
+    if (!fsReadSession(recovered)) return;
 
-    Serial.printf("[Recovery] Ditemukan: '%s' %.4f kWh\n", recoveredName, recoveredKwh);
-    oledStatus("Recovery sesi", recoveredName);
+    Serial.printf("[Recovery] Reset=%s blackout=%s checkpoint='%s' %.4f kWh state=%s mode=%s\n",
+                  resetReasonToString(resetReason),
+                  isBlackoutReset(resetReason) ? "yes" : "no",
+                  recovered.name,
+                  recovered.kwh,
+                  sessionStateToString(recovered.sessionState),
+                  recovered.offlineMode ? "OFFLINE" : "ONLINE");
+    oledStatus("Recovery sesi", recovered.name);
     delay(1500);
 
     unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-    if ((recoveredStartTs == 0 || recoveredStartTs > nowTs) && recoveredElapsedSec > 0) {
-        recoveredStartTs = nowTs > recoveredElapsedSec ? nowTs - recoveredElapsedSec : nowTs;
+    if ((recovered.startTs == 0 || recovered.startTs > nowTs) && recovered.elapsedSec > 0) {
+        recovered.startTs = nowTs > recovered.elapsedSec ? nowTs - recovered.elapsedSec : nowTs;
     }
 
-    strlcpy(sessionDeviceName, recoveredName, sizeof(sessionDeviceName));
-    sessionStartTs      = recoveredStartTs;
-    sessionEnergyWh     = recoveredEnergyWh;
-    sessionKwh          = recoveredKwh;
-    sessionCost         = recoveredCost;
+    strlcpy(sessionDeviceName, recovered.name, sizeof(sessionDeviceName));
+    sessionStartTs      = recovered.startTs;
+    sessionEnergyWh     = recovered.energyWh;
+    sessionKwh          = recovered.kwh;
+    sessionCost         = recovered.cost;
     hadDataOnce         = true;
     disconnectCount     = 0;
-    isOverload          = false;
+    isOverload          = recovered.overload;
+    overloadWarning     = false;
     overloadAlertLinger = false;
     recoveredSessionPending = true;
     recoveredNoDeviceCount  = 0;
+    prevDevConn         = false;
+
+    if (strlen(recovered.uid) > 0) strlcpy(currentUid, recovered.uid, sizeof(currentUid));
+    if (strlen(recovered.sessionId) > 0) strlcpy(currentSessionId, recovered.sessionId, sizeof(currentSessionId));
+    sessionData.endReason = SESSION_END_NONE;
+    setSystemMode(modeOffline ? SystemMode::OFFLINE : SystemMode::ONLINE, "boot recovery mode");
+    setSessionState(recovered.sessionState, "checkpoint restored");
 
     setRelay(true, "resume recovered session");
     sessionActive = true;
     loadCheckPending = false;
     fsWriteSession();
 
-    oledStatus("Recovery lanjut", recoveredName);
+    oledStatus("Recovery lanjut", recovered.name);
     delay(1000);
 }
 
@@ -372,30 +448,63 @@ void handleDeviceDisconnect() {
 // HANDLE OVERLOAD
 // ================================================================
 void handleOverload(float power) {
-    bool newOvl = relayOn && sessionActive && deviceConnected && (power >= overloadThreshold);
-    if (newOvl && !isOverload) {
-        isOverload = true;
-        setSessionState(SessionState::OVERLOAD, "power threshold exceeded");
-        Serial.printf("[Overload] ⚠ %.1fW >= %.0fW — relay OFF\n", power, overloadThreshold);
+    bool canEvaluate = relayOn && sessionActive && deviceConnected && !overloadAlertLinger;
+    float warningAt = overloadThreshold > OVERLOAD_WARNING_MARGIN_W
+        ? overloadThreshold - OVERLOAD_WARNING_MARGIN_W
+        : overloadThreshold;
 
-        unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-        archiveCurrentSession(nowTs, power, false, true);
-
-        setRelay(false, "overload");
-        overloadAlertLinger = true;
-        overloadLingerStart = millis();
-        sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
-        sessionDeviceName[0] = '\0';
-        currentSessionId[0] = '\0';
-        saveSessionId();
-
-    } else if (!newOvl && isOverload) {
-        isOverload = false;
-        setSessionState(SessionState::IDLE, "overload cleared");
-        Serial.println("[Overload] ✓ Teratasi");
-
-        // Tetap idle setelah overload; user bisa mulai sesi baru manual.
+    bool warning = canEvaluate && power >= warningAt && power < overloadThreshold;
+    if (warning != overloadWarning) {
+        overloadWarning = warning;
+        warningBlinkState = false;
+        digitalWrite(PIN_LED_RED, LOW);
+        digitalWrite(PIN_BUZZER, LOW);
+        Serial.printf("[Overload] Warning %s P=%.1fW threshold=%.0fW\n",
+                      overloadWarning ? "ON" : "OFF", power, overloadThreshold);
     }
+
+    bool newOvl = canEvaluate && (power >= overloadThreshold);
+    if (!newOvl) {
+        if (!canEvaluate) overloadWarning = false;
+        return;
+    }
+
+    isOverload = true;
+    overloadWarning = false;
+    sessionData.endReason = SESSION_END_OVERLOAD;
+    setSessionState(SessionState::OVERLOAD, "power threshold exceeded");
+    Serial.printf("[Overload] %.1fW >= %.0fW - relay OFF immediately\n", power, overloadThreshold);
+
+    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+    fsWriteSession();
+
+    relayOn = false;
+    digitalWrite(PIN_RELAY, RELAY_OFF);
+    loadCheckPending = false;
+    loadCheckStartedMs = 0;
+    loadDetectStableCount = 0;
+    disconnectCount = 0;
+    recoveredSessionPending = false;
+    recoveredNoDeviceCount = 0;
+
+    overloadAlertLinger = true;
+    overloadLingerStart = millis();
+    overloadBlinkState = false;
+    lastOverloadBlinkMs = 0;
+
+    archiveCurrentSession(nowTs, power, false, true);
+    sessionActive = false;
+    if (wifiConnected) {
+        sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, true, false, nowTs);
+    }
+
+    isOverload = false;
+    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
+    hadDataOnce = false; prevDevConn = false;
+    sessionDeviceName[0] = '\0';
+    currentSessionId[0] = '\0';
+    saveSessionId();
+    fsClearSession();
 }
 
 // ================================================================

@@ -41,6 +41,32 @@ static void beginWifiScan() {
     WiFi.scanNetworks(true, true);
 }
 
+static void syncPortalSettingsToFirebase() {
+    if (!wifiConnected || WiFi.status() != WL_CONNECTED) return;
+
+    WiFiClientSecure c; c.setInsecure(); c.setTimeout(5000);
+    HTTPClient h;
+
+    if (h.begin(c, String(FIREBASE_HOST) + "/config/threshold.json")) {
+        h.addHeader("Content-Type", "application/json");
+        h.PUT(String(overloadThreshold, 0));
+        h.end();
+    }
+
+    if (strlen(currentUid) == 0) return;
+
+    WiFiClientSecure c2; c2.setInsecure(); c2.setTimeout(5000);
+    HTTPClient h2;
+    String path = String("/users/") + currentUid + "/settings.json";
+    if (h2.begin(c2, String(FIREBASE_HOST) + path)) {
+        h2.addHeader("Content-Type", "application/json");
+        String body = "{\"overloadThreshold\":" + String(overloadThreshold, 0) +
+                      ",\"tariff\":" + String(tarif, 2) + "}";
+        h2.PATCH(body);
+        h2.end();
+    }
+}
+
 // ================================================================
 // WiFi CONNECT
 // ================================================================
@@ -230,7 +256,7 @@ function rescan(){
 function save(){
     var thr=parseFloat(document.getElementById('thr').value);
     var trf=parseFloat(document.getElementById('trf').value);
-    if(isNaN(thr)||thr<100||thr>10000){toast('Threshold 100-10000 W','err');return;}
+    if(isNaN(thr)||thr<=0||thr>10000){toast('Threshold harus > 0 dan <= 10000 W','err');return;}
     if(isNaN(trf)||trf<=0){toast('Tarif tidak valid','err');return;}
     fetch('/save?thr='+thr+'&trf='+trf).then(function(r){return r.text();})
         .then(function(t){toast(t,(t.indexOf('Tersimpan')>=0)?'ok':'err');});
@@ -254,7 +280,7 @@ static void handleSave() {
     bool ok = false;
     if (localServer.hasArg("thr")) {
         float v = localServer.arg("thr").toFloat();
-        if (v >= 100 && v <= 10000) { overloadThreshold = v; ok = true; }
+        if (setOverloadThreshold(v, "captive portal")) ok = true;
     }
     if (localServer.hasArg("trf")) {
         float v = localServer.arg("trf").toFloat();
@@ -262,15 +288,7 @@ static void handleSave() {
     }
     if (ok) {
         savePrefs();
-        if (wifiConnected) {
-            WiFiClientSecure c; c.setInsecure(); c.setTimeout(5000);
-            HTTPClient h;
-            if (h.begin(c, String(FIREBASE_HOST) + "/config/threshold.json")) {
-                h.addHeader("Content-Type", "application/json");
-                h.PUT(String(overloadThreshold, 0));
-                h.end();
-            }
-        }
+        syncPortalSettingsToFirebase();
         localServer.send(200, "text/plain",
             "Tersimpan! Threshold=" + String(overloadThreshold, 0) +
             "W | Tarif=Rp" + String(tarif, 2));
