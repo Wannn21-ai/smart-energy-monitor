@@ -278,6 +278,7 @@ void handleReconnectResync() {
         fsWriteSession();
     }
 
+    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
     syncSessionDataFromLegacy(nowTs);
     bool ok = sendToFirebase(lastV, lastI, lastP, lastPF, lastHz,
                              sessionKwh, sessionCost,
