@@ -17,6 +17,7 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
                            float avgPower, float energyKwh, float cost,
                            unsigned long ts, bool recovered, bool wasOverload,
                            const char* endReason = "NORMAL_STOP");
+bool firebaseHasAuthToken();
 
 // ── Config Sync ──────────────────────────────────────────────────
 void syncConfigFromFirebase();

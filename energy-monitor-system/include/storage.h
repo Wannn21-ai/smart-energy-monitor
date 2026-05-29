@@ -49,3 +49,5 @@ bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
                             bool recovered = false);
 bool fsSyncOfflineHistoryToFirebase();
 int  fsCountOfflineHistory();
+int  fsCountLocalHistory();
+bool fsReadHistoryJson(String &out);

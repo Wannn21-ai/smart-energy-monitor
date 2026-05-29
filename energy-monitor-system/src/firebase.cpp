@@ -5,6 +5,7 @@
 
 #include "firebase.h"
 #include "config.h"
+#include "credentials.h"
 #include "state.h"
 #include "storage.h"
 #include "session.h"
@@ -14,6 +15,45 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+
+static String urlEncode(const char* value) {
+    String out;
+    if (!value) return out;
+    const char* hex = "0123456789ABCDEF";
+    while (*value) {
+        unsigned char c = (unsigned char)*value++;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+            c == '.' || c == '~') {
+            out += (char)c;
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+static String firebaseAuthQuery() {
+#if defined(FIREBASE_ID_TOKEN)
+    if (strlen(FIREBASE_ID_TOKEN) > 0 &&
+        strcmp(FIREBASE_ID_TOKEN, "YOUR_FIREBASE_ID_TOKEN") != 0) {
+        return String("?auth=") + urlEncode(FIREBASE_ID_TOKEN);
+    }
+#endif
+#if defined(FIREBASE_SECRET)
+    if (strlen(FIREBASE_SECRET) > 0 &&
+        strcmp(FIREBASE_SECRET, "YOUR_FIREBASE_DATABASE_SECRET") != 0) {
+        return String("?auth=") + urlEncode(FIREBASE_SECRET);
+    }
+#endif
+    return "";
+}
+
+bool firebaseHasAuthToken() {
+    return firebaseAuthQuery().length() > 0;
+}
 
 // ================================================================
 // SEND LIVE DATA
@@ -42,6 +82,7 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
     j += "\"system\":{";
     j += "\"timestamp\":"      + String(ts);
     j += ",\"internet\":true";
+    j += ",\"ip\":\"";          j += WiFi.localIP().toString(); j += "\"";
     j += ",\"threshold\":"     + String(appConfig.overloadThreshold, 0);
     j += ",\"tarif\":"         + String(appConfig.electricityCostPerKwh, 2);
     j += ",\"relay\":"         + String(relay ? "true" : "false");
@@ -128,7 +169,12 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
 
     WiFiClientSecure c; c.setInsecure(); c.setTimeout(10000);
     HTTPClient h;
-    h.begin(c, String(FIREBASE_HOST) + String(path));
+    String authQuery = firebaseAuthQuery();
+    if (authQuery.length() == 0) {
+        Serial.println("[History] Firebase sync skipped: no auth token");
+        return false;
+    }
+    h.begin(c, String(FIREBASE_HOST) + String(path) + authQuery);
     h.addHeader("Content-Type", "application/json");
 
     String safeName = jsonEscape(displayName);
@@ -155,7 +201,10 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
     Serial.printf("[History] Firebase target /users/%s/history/%s endReason=%s\n",
                   currentUid, historyKeyStr, safeEndReason.c_str());
     Serial.printf("[History] Push '%s' → %d\n", displayName, code);
-    return (code == 200 || code == 204);
+    if (code == 401) {
+        Serial.println("[History] Push unauthorized (401): auth token missing, expired, or uid not allowed");
+    }
+    return (code == 200 || code == 201 || code == 204);
 }
 
 // ================================================================

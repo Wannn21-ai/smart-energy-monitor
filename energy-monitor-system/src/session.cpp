@@ -190,6 +190,10 @@ static bool archiveCurrentSession(const char* name, unsigned long startTs, unsig
     bool saved = fsAppendOfflineHistory(safeName, startTs, endTs,
                                         energyKwh, cost, power,
                                         wasOverload, reasonText, recovered);
+    Serial.printf("[Session] Local history write %s local=%d pending=%d\n",
+                  saved ? "OK" : "FAIL",
+                  fsCountLocalHistory(), fsCountOfflineHistory());
+    if (!saved) return false;
 
     if (wifiConnected && WiFi.status() == WL_CONNECTED) {
         bool ok = fsSyncOfflineHistoryToFirebase();

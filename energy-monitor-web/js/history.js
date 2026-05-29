@@ -2,7 +2,8 @@ import {
   requireAuth, renderShell, fillUserInfo, showToast,
   startStatusWatcher, loadAndApplySettings
 } from "./auth-guard.js";
-import { db, ref, set, get, onValue } from "./firebase-config.js";
+import { db, ref, set, onValue } from "./firebase-config.js";
+import { loadDeviceHistory } from "./local-history.js";
 
 const user = await requireAuth();
 renderShell("history", "HISTORY");
@@ -21,16 +22,15 @@ let activeFilter = "all";
 let searchKeyword = "";
 
 // ================= LOAD =================
-onValue(historyRef, snapshot => {
-  if (!snapshot.exists()) {
-    historyData = [];
-  } else {
-    historyData = Object.entries(snapshot.val())
-      .map(([key, val]) => ({ ...val, _key: key }))
-      .sort((a, b) => b.timestamp - a.timestamp);
-  }
+let refreshToken = 0;
+async function refreshHistory() {
+  const token = ++refreshToken;
+  historyData = await loadDeviceHistory(uid);
+  if (token !== refreshToken) return;
   render();
-});
+}
+onValue(historyRef, refreshHistory);
+await refreshHistory();
 
 // ================= ELEMENTS =================
 const listEl       = document.getElementById("history-list");
@@ -115,6 +115,11 @@ listEl.addEventListener("click", async e => {
   if (e.target.classList.contains("btn-delete")) {
     e.stopPropagation();
     const key = e.target.dataset.key;
+    const session = historyData.find(s => s._key === key);
+    if (session?._source === "local") {
+      showToast("Local ESP32 history tetap disimpan di LittleFS", "error");
+      return;
+    }
     if (!confirm("Delete this session?")) return;
     try {
       await set(ref(db, `users/${uid}/history/${key}`), null);
@@ -124,7 +129,11 @@ listEl.addEventListener("click", async e => {
   }
   const card = e.target.closest(".history-card");
   if (card) {
+    const session = historyData.find(s => s._key === card.dataset.key);
     sessionStorage.setItem(`sem_selected_key_${uid}`, card.dataset.key);
+    if (session) {
+      sessionStorage.setItem(`sem_selected_session_${uid}`, JSON.stringify(session));
+    }
     window.location.href = "history-detail.html";
   }
 });

@@ -4,6 +4,7 @@ import {
   loadAndApplySettings
 } from "./auth-guard.js";
 import { db, ref, onValue, set, push, get } from "./firebase-config.js";
+import { loadDeviceHistory } from "./local-history.js";
 
 // ================= INIT =================
 const user = await requireAuth();
@@ -153,13 +154,7 @@ async function sendRelayCommand(type, payload = {}) {
 
 // ================= STORAGE =================
 async function getHistory() {
-  try {
-    const snap = await get(historyRef);
-    if (!snap.exists()) return [];
-    return Object.entries(snap.val())
-      .map(([key, val]) => ({ ...val, _key: key }))
-      .sort((a, b) => b.timestamp - a.timestamp);
-  } catch { return []; }
+  return loadDeviceHistory(uid);
 }
 
 async function pushHistory(entry) {
@@ -168,10 +163,7 @@ async function pushHistory(entry) {
 }
 
 async function getSessionCount() {
-  try {
-    const snap = await get(historyRef);
-    return snap.exists() ? Object.keys(snap.val()).length : 0;
-  } catch { return 0; }
+  return (await getHistory()).length;
 }
 
 async function saveActiveSession(data) {

@@ -3,6 +3,7 @@ import {
   startStatusWatcher, loadAndApplySettings
 } from "./auth-guard.js";
 import { db, ref, get } from "./firebase-config.js";
+import { loadDeviceHistory } from "./local-history.js";
 
 const user = await requireAuth();
 renderShell("history", "SESSION DETAIL");
@@ -14,6 +15,10 @@ const uid = user.uid;
 await loadAndApplySettings(uid);
 
 const selectedKey = sessionStorage.getItem(`sem_selected_key_${uid}`);
+const cachedSession = (() => {
+  try { return JSON.parse(sessionStorage.getItem(`sem_selected_session_${uid}`)); }
+  catch { return null; }
+})();
 
 const detailGrid  = document.getElementById("detail-grid");
 const detailEmpty = document.getElementById("detail-empty");
@@ -26,12 +31,19 @@ if (!selectedKey) {
   btnExport.style.display   = "none";
 } else {
   try {
-    const snap = await get(ref(db, `users/${uid}/history/${selectedKey}`));
-    if (!snap.exists()) {
+    let session = cachedSession?._key === selectedKey ? cachedSession : null;
+    if (!session) {
+      const snap = await get(ref(db, `users/${uid}/history/${selectedKey}`));
+      if (snap.exists()) session = snap.val();
+    }
+    if (!session) {
+      const allHistory = await loadDeviceHistory(uid);
+      session = allHistory.find(item => item._key === selectedKey);
+    }
+    if (!session) {
       detailEmpty.style.display = "flex";
       btnExport.style.display   = "none";
     } else {
-      const session = snap.val();
       nameEl.textContent = session.name;
       dateEl.textContent = `Recorded on ${session.date}`;
       const fields = [

@@ -42,6 +42,14 @@ static void beginWifiScan() {
     WiFi.scanNetworks(true, true);
 }
 
+static void sendCorsHeaders() {
+    localServer.sendHeader("Access-Control-Allow-Origin", "*");
+    localServer.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    localServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    localServer.sendHeader("Access-Control-Allow-Private-Network", "true");
+    localServer.sendHeader("Cache-Control", "no-store");
+}
+
 static void syncPortalSettingsToFirebase() {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return;
 
@@ -399,6 +407,22 @@ static void handleStatus() {
     localServer.send(200, "application/json", json);
 }
 
+static void handleHistory() {
+    String json;
+    bool ok = fsReadHistoryJson(json);
+    int local = fsCountLocalHistory();
+    int pending = fsCountOfflineHistory();
+    Serial.printf("[LocalWeb] History endpoint ok=%d local=%d pending=%d\n",
+                  ok ? 1 : 0, local, pending);
+    sendCorsHeaders();
+    localServer.send(ok ? 200 : 500, "application/json", ok ? json : "[]");
+}
+
+static void handleOptions() {
+    sendCorsHeaders();
+    localServer.send(204, "text/plain", "");
+}
+
 static void handleRescan() {
     beginWifiScan();
     localServer.send(200, "text/plain", "Scanning...");
@@ -419,6 +443,8 @@ void setupWebServer() {
     localServer.on("/offline",     HTTP_GET, handleOfflineMode);
     localServer.on("/resetwifi",   HTTP_GET, handleResetWifi);
     localServer.on("/status",      HTTP_GET, handleStatus);
+    localServer.on("/history",     HTTP_GET, handleHistory);
+    localServer.on("/history",     HTTP_OPTIONS, handleOptions);
     localServer.on("/rescan",      HTTP_GET, handleRescan);
     localServer.on("/scan",        HTTP_GET, handleRescan);
 

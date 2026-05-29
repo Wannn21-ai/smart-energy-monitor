@@ -314,11 +314,25 @@ static size_t fsHistoryFileSize() {
     return size;
 }
 
+static size_t fsHistoryJsonCapacity() {
+    size_t size = fsHistoryFileSize();
+    size_t capacity = size * 2 + 1024;
+    return capacity < 4096 ? 4096 : capacity;
+}
+
+static int countPendingHistory(JsonArray arr) {
+    int pending = 0;
+    for (JsonObject entry : arr) {
+        if (entry["pendingSync"] | true) pending++;
+    }
+    return pending;
+}
+
 bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
                             unsigned long endTs, float energyKwh,
                             float cost, float avgPower, bool wasOverload,
                             const char* endReason, bool recovered) {
-    DynamicJsonDocument doc(4096);
+    DynamicJsonDocument doc(fsHistoryJsonCapacity());
     JsonArray arr = doc.to<JsonArray>();
 
     if (LittleFS.exists(FS_HISTORY_PATH)) {
@@ -348,7 +362,7 @@ bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
                             strcmp(existingReason, reasonText) == 0;
         if (sameSessionId || sameFallback) {
             Serial.printf("[FS] History duplicate skipped: '%s' reason=%s pending=%d size=%u\n",
-                          name, reasonText, (int)arr.size(),
+                          name, reasonText, countPendingHistory(arr),
                           (unsigned)fsHistoryFileSize());
             return true;
         }
@@ -381,7 +395,9 @@ bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
     bool ok = written > 0;
     Serial.printf("[FS] History write %s: '%s' %.4f kWh reason=%s pending=%d size=%u\n",
                   ok ? "OK" : "FAIL", name, energyKwh, reasonText,
-                  (int)arr.size(), (unsigned)fsHistoryFileSize());
+                  countPendingHistory(arr), (unsigned)fsHistoryFileSize());
+    Serial.printf("[FS] Local history count=%d pending=%d\n",
+                  (int)arr.size(), countPendingHistory(arr));
     return ok;
 }
 
@@ -391,15 +407,23 @@ bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
 bool fsSyncOfflineHistoryToFirebase() {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
     if (!LittleFS.exists(FS_HISTORY_PATH)) return true;
+    if (!firebaseHasAuthToken()) {
+        Serial.printf("[Sync] Firebase sync skipped: no auth token pending=%d local=%d\n",
+                      fsCountOfflineHistory(), fsCountLocalHistory());
+        return false;
+    }
 
     File f = LittleFS.open(FS_HISTORY_PATH, "r");
     if (!f) return false;
 
-    DynamicJsonDocument doc(4096);
+    DynamicJsonDocument doc(fsHistoryJsonCapacity());
     DeserializationError err = deserializeJson(doc, f);
     f.close();
 
     if (err || !doc.is<JsonArray>()) {
+        Serial.printf("[FS] history_offline.json corrupt, sync skipped: %s\n",
+                      err ? err.c_str() : "not array");
+        return false;
         Serial.println("[FS] history_offline.json corrupt — hapus");
         LittleFS.remove(FS_HISTORY_PATH);
         Serial.printf("[Sync] Pending cleared, pending=0 size=0\n");
@@ -412,11 +436,20 @@ bool fsSyncOfflineHistoryToFirebase() {
         return true;
     }
 
-    Serial.printf("[Sync] Mulai sync %d sesi offline ke Firebase size=%u\n",
-                  (int)arr.size(), (unsigned)fsHistoryFileSize());
+    int pendingBefore = countPendingHistory(arr);
+    if (pendingBefore == 0) {
+        Serial.printf("[Sync] No pending history, local=%d size=%u\n",
+                      (int)arr.size(), (unsigned)fsHistoryFileSize());
+        return true;
+    }
+
+    Serial.printf("[Sync] Mulai sync %d sesi offline ke Firebase local=%d size=%u\n",
+                  pendingBefore, (int)arr.size(), (unsigned)fsHistoryFileSize());
 
     int pushed = 0;
     for (JsonObject entry : arr) {
+        if (!(entry["pendingSync"] | true)) continue;
+
         const char*   name    = entry["name"]     | "Offline Device";
         unsigned long startTs = entry["start_ts"] | (unsigned long)0;
         unsigned long endTs   = entry["end_ts"]   | (unsigned long)0;
@@ -445,9 +478,34 @@ bool fsSyncOfflineHistoryToFirebase() {
             Serial.printf("[Sync] Push '%s' gagal — berhenti\n", name);
             break;
         }
+        entry["pendingSync"] = false;
+        entry["syncedAt"] = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
         pushed++;
         delay(300);
     }
+
+    File fw = LittleFS.open(FS_HISTORY_PATH, "w");
+    if (fw) {
+        serializeJson(doc, fw);
+        fw.flush();
+        fw.close();
+    } else {
+        Serial.println("[Sync] Gagal simpan status sync lokal");
+        return false;
+    }
+
+    int pendingAfter = countPendingHistory(arr);
+    Serial.printf("[Sync] Pending before=%d after=%d local=%d size=%u\n",
+                  pendingBefore, pendingAfter, (int)arr.size(),
+                  (unsigned)fsHistoryFileSize());
+    if (pendingAfter == 0) {
+        Serial.printf("[Sync] Semua %d pending berhasil di-sync, local history tetap disimpan\n",
+                      pushed);
+        return true;
+    }
+    Serial.printf("[Sync] %d/%d berhasil, sisanya tetap pending\n",
+                  pushed, pendingBefore);
+    return false;
 
     if (pushed == (int)arr.size()) {
         LittleFS.remove(FS_HISTORY_PATH);
@@ -480,8 +538,38 @@ int fsCountOfflineHistory() {
     if (!LittleFS.exists(FS_HISTORY_PATH)) return 0;
     File f = LittleFS.open(FS_HISTORY_PATH, "r");
     if (!f) return 0;
-    DynamicJsonDocument doc(4096);
+    DynamicJsonDocument doc(fsHistoryJsonCapacity());
+    if (deserializeJson(doc, f) || !doc.is<JsonArray>()) { f.close(); return 0; }
+    f.close();
+    return countPendingHistory(doc.as<JsonArray>());
+}
+
+int fsCountLocalHistory() {
+    if (!LittleFS.exists(FS_HISTORY_PATH)) return 0;
+    File f = LittleFS.open(FS_HISTORY_PATH, "r");
+    if (!f) return 0;
+    DynamicJsonDocument doc(fsHistoryJsonCapacity());
     if (deserializeJson(doc, f) || !doc.is<JsonArray>()) { f.close(); return 0; }
     f.close();
     return (int)doc.as<JsonArray>().size();
+}
+
+bool fsReadHistoryJson(String &out) {
+    out = "[]";
+    if (!LittleFS.exists(FS_HISTORY_PATH)) return true;
+
+    File f = LittleFS.open(FS_HISTORY_PATH, "r");
+    if (!f) return false;
+    DynamicJsonDocument doc(fsHistoryJsonCapacity());
+    DeserializationError err = deserializeJson(doc, f);
+    f.close();
+    if (err || !doc.is<JsonArray>()) {
+        Serial.printf("[FS] Local history read failed: %s\n",
+                      err ? err.c_str() : "not array");
+        return false;
+    }
+
+    out = "";
+    serializeJson(doc.as<JsonArray>(), out);
+    return true;
 }
