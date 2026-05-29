@@ -308,9 +308,9 @@ bool fsReadSession(PersistedSession &out) {
 void fsAppendOfflineHistory(const char* name, unsigned long startTs,
                             unsigned long endTs, float energyKwh,
                             float cost, float avgPower, bool wasOverload,
-                            const char* endReason) {
+                            const char* endReason, bool recovered) {
     DynamicJsonDocument doc(4096);
-    JsonArray arr;
+    JsonArray arr = doc.to<JsonArray>();
 
     if (LittleFS.exists(FS_HISTORY_PATH)) {
         File f = LittleFS.open(FS_HISTORY_PATH, "r");
@@ -324,8 +324,6 @@ void fsAppendOfflineHistory(const char* name, unsigned long startTs,
                 arr = doc.to<JsonArray>();
             }
         }
-    } else {
-        arr = doc.to<JsonArray>();
     }
 
     JsonObject entry = arr.createNestedObject();
@@ -336,6 +334,8 @@ void fsAppendOfflineHistory(const char* name, unsigned long startTs,
     entry["cost"]     = cost;
     entry["power"]    = avgPower;
     entry["overload"] = wasOverload;
+    entry["recovered"] = recovered;
+    entry["pendingSync"] = true;
     entry["endReason"] = endReason && strlen(endReason) > 0 ? endReason : "NORMAL_STOP";
     entry["uid"]      = currentUid;
     entry["sessionId"] = currentSessionId;
@@ -384,6 +384,7 @@ bool fsSyncOfflineHistoryToFirebase() {
         float         cost    = entry["cost"]     | 0.0f;
         float         avgPwr  = entry["power"]    | 0.0f;
         bool          wasOvl  = entry["overload"] | false;
+        bool          recovered = entry["recovered"] | false;
         const char*   reason  = entry["endReason"] | (wasOvl ? "OVERLOAD" : "NORMAL_STOP");
         const char*   uid     = entry["uid"]      | "";
         const char*   sessId  = entry["sessionId"] | "";
@@ -394,7 +395,7 @@ bool fsSyncOfflineHistoryToFirebase() {
         String dur = buildDuration(startTs, endTs);
         bool ok = pushHistoryToFirebase(name, dur.c_str(), avgPwr, kwh, cost,
                                         endTs > 0 ? endTs : startTs,
-                                        true, wasOvl, reason);
+                                        recovered, wasOvl, reason);
         if (!ok) {
             Serial.printf("[Sync] Push '%s' gagal — berhenti\n", name);
             break;

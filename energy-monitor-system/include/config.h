@@ -53,7 +53,7 @@
 #define LOAD_DETECT_STABLE_SAMPLES 2
 #define LOAD_MIN_CURRENT           0.02f
 #define LOAD_MIN_POWER             1.0f
-#define LOAD_REMOVED_DEBOUNCE_MS   6000UL
+#define LOAD_REMOVED_DEBOUNCE_MS   2500UL
 
 // ── Button Hold Thresholds (ms) ──────────────────────────────────
 #define BTN_NEW_SESSION_HOLD 1000UL

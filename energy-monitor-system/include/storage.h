@@ -45,6 +45,7 @@ bool fsReadSession(PersistedSession &out);
 void fsAppendOfflineHistory(const char* name, unsigned long startTs,
                             unsigned long endTs, float energyKwh,
                             float cost, float avgPower, bool wasOverload,
-                            const char* endReason = "NORMAL_STOP");
+                            const char* endReason = "NORMAL_STOP",
+                            bool recovered = false);
 bool fsSyncOfflineHistoryToFirebase();
 int  fsCountOfflineHistory();

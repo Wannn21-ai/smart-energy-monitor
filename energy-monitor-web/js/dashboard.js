@@ -88,6 +88,7 @@ let firebaseSessionId = "";
 let firebaseSessionUid = "";
 let firebaseSystemMode = null;
 let firebaseSessionState = null;
+let firebasePendingSync = 0;
 let systemInternet   = false;
 let deviceNameFromEsp = "—";  // Device name dari ESP32 (untuk offline mode)
 
@@ -811,13 +812,11 @@ if (btnStop) {
     if (!isRunning || !activeDevice) {
       showToast("Tidak ada sesi yang berjalan", "error"); return;
     }
-    await saveSession();
     // State migration point: MONITORING -> FINISHED; ESP32 keeps the source of truth.
     sessionState = SessionState.FINISHED;
     await sendRelayCommand("STOP", {
       sessionId: activeDevice.id,
-      reason: "USER_STOP",
-      skipHistory: true
+      reason: "USER_STOP"
     });
     showToast("Sesi dihentikan — relay OFF ⏹", "");
     await resetMonitoring();
@@ -841,6 +840,7 @@ onValue(ref(db, "live"), snapshot => {
   firebaseSessionUid = sys.uid || "";
   firebaseSystemMode = sys.systemMode || null;
   firebaseSessionState = sys.sessionState || null;
+  firebasePendingSync = Number(sys.pendingSync || 0);
   deviceNameFromEsp = sys.deviceName || "Device";  // Ambil nama device dari ESP32
 
   const dev = data.device || {};
@@ -915,8 +915,7 @@ async function updateMeters() {
   
   // ── Mode status banner ────────────────────────────────
   // Tampilkan badge mode offline dengan jumlah sesi pending sync
-  // TODO: Get pending count dari API atau Firebase
-  updateModeStatusBanner(systemMode !== SystemMode.ONLINE, firebaseRelay, 0);
+  updateModeStatusBanner(systemMode !== SystemMode.ONLINE, firebaseRelay, firebasePendingSync);
 
   // ── Update status bar ──────────────────────────────────
   setSystemStatus(systemOnline);
@@ -994,7 +993,11 @@ async function updateMeters() {
 
   // ── Transfer data offline → online ────────────────────
   // Saat esp32 reconnect dari offline mode, data akan disinkron
-  if (systemOnline && prevSystemOnline === false && isRunning && activeDevice) {
+  if (systemOnline && prevSystemOnline === false) {
+    await updateSessionCount();
+    await updateBarPie();
+    await renderDeviceTabs();
+    if (isRunning && activeDevice) {
     if (firebaseEnergy > 0) {
       lastknownEnergy = firebaseEnergy;
       console.log(`[Transfer] Offline→Online: E=${firebaseEnergy.toFixed(4)} kWh`);
@@ -1004,6 +1007,7 @@ async function updateMeters() {
       );
     } else {
       showToast(`✓ ESP32 online • Mode: ${firebaseOffline ? "OFFLINE" : "ONLINE"}`, "success");
+    }
     }
   }
 

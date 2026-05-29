@@ -7,6 +7,7 @@
 // ================================================================
 
 #include <Arduino.h>
+#include "state.h"
 
 // ── Relay (single entry point) ───────────────────────────────────
 void setRelay(bool on, const char* reason = "");
@@ -28,6 +29,9 @@ void handleRecoveredSessionCheck();
 // ── Device Disconnect & Overload ─────────────────────────────────
 void beginLoadCheck(const char* reason = "");
 void handleLoadCheck(float current, float power);
+void finalizeSession(SessionEndReason reason, const char* source = "",
+                     bool recovered = false, bool wasOverload = false,
+                     bool turnRelayOff = true, float finalPower = -1.0f);
 void handleLoadRemovedDuringMonitoring(float current, float power);
 void handleDeviceDisconnect();
 void handleOverload(float power);

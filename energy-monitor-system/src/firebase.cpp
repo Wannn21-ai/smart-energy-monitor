@@ -234,7 +234,7 @@ void pollCommandFromFirebase() {
 
     String pl = h.getString(); pl.trim(); h.end();
 
-    bool hasCommand = false, cmdStart = false, cmdStop = false, cmdSkipHistory = false;
+    bool hasCommand = false, cmdStart = false, cmdStop = false;
     char cmdId[48]="", cmdUid[64]="", cmdSessionId[48]="", cmdDeviceName[32]="";
     float cmdTarif = 0, cmdThreshold = 0;
 
@@ -255,7 +255,6 @@ void pollCommandFromFirebase() {
         strlcpy(cmdDeviceName, doc["deviceName"] | "", sizeof(cmdDeviceName));
         cmdTarif     = doc["tariff"]    | 0.0f;
         cmdThreshold = doc["threshold"] | 0.0f;
-        cmdSkipHistory = doc["skipHistory"] | false;
     }
 
     if (!hasCommand || (!cmdStart && !cmdStop)) return;
@@ -291,27 +290,16 @@ void pollCommandFromFirebase() {
         Serial.println("[Command] ✓ Relay ON (web)");
 
     } else if (cmdStop && relayOn) {
-        unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-        sessionData.endReason = SESSION_END_NORMAL_STOP;
-        setSessionState(SessionState::FINISHED, "web command STOP");
-        if (!cmdSkipHistory && sessionActive && sessionKwh > 0) {
-            String dur = buildDuration(sessionStartTs, nowTs);
-            bool ok = pushHistoryToFirebase(sessionDeviceName, dur.c_str(),
-                                            lastP, sessionKwh, sessionCost,
-                                            nowTs, false, false,
-                                            sessionEndReasonToString(sessionData.endReason));
-            if (!ok) {
-                fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                                      sessionKwh, sessionCost, lastP, false,
-                                      sessionEndReasonToString(sessionData.endReason));
-            }
+        if (sessionActive && hadDataOnce) {
+            finalizeSession(SESSION_END_USER_STOP, "web command STOP");
+        } else {
+            setRelay(false, "web command STOP");
+            sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
+            hadDataOnce = false; prevDevConn = false; disconnectCount = 0;
+            sessionDeviceName[0] = '\0';
+            currentSessionId[0] = '\0';
+            saveSessionId();
         }
-        setRelay(false, "web command STOP");
-        sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
-        hadDataOnce = false; prevDevConn = false; disconnectCount = 0;
-        sessionDeviceName[0] = '\0';
-        currentSessionId[0] = '\0';
-        saveSessionId();
         clearFirebaseCommand();
         Serial.println("[Command] ✓ Relay OFF (web)");
     }

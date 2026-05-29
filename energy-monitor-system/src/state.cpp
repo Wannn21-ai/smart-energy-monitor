@@ -133,6 +133,10 @@ void setSessionState(SessionState next, const char* reason) {
 void syncStateMachineFromLegacy() {
     systemMode = modeOffline ? SystemMode::OFFLINE : SystemMode::ONLINE;
 
+    if (sessionState == SessionState::FINISHED && !relayOn && !sessionActive) {
+        return;
+    }
+
     if (isOverload || overloadAlertLinger) {
         sessionState = SessionState::OVERLOAD;
     } else if (relayOn && sessionActive) {

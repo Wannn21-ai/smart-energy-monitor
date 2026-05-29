@@ -188,50 +188,89 @@ static void archiveCurrentSession(unsigned long nowTs, float power, bool recover
     String dur = buildDuration(sessionStartTs, nowTs);
     const char* reasonText = sessionEndReasonToString(endReason);
 
-    if (wifiConnected) {
-        bool ok = pushHistoryToFirebase(sessionDeviceName, dur.c_str(),
-                                       power, sessionData.energy, sessionData.cost,
-                                       nowTs, recovered, wasOverload, reasonText);
-        Serial.printf("[Session] History push: %s\n", ok ? "OK" : "FAIL");
-        if (!ok) {
-            fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                                  sessionData.energy, sessionData.cost, power, wasOverload, reasonText);
-        }
+    fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
+                          sessionData.energy, sessionData.cost, power,
+                          wasOverload, reasonText, recovered);
+
+    if (wifiConnected && WiFi.status() == WL_CONNECTED) {
+        bool ok = fsSyncOfflineHistoryToFirebase();
+        Serial.printf("[Session] History sync after finalize: %s\n", ok ? "OK" : "PENDING");
     } else {
-        fsAppendOfflineHistory(sessionDeviceName, sessionStartTs, nowTs,
-                              sessionData.energy, sessionData.cost, power, wasOverload, reasonText);
-        Serial.println("[Session] History queued offline");
+        Serial.println("[Session] History saved locally, waiting for sync");
     }
 }
 
-static void clearFinishedSession(const char* reason) {
-    setRelay(false, reason);
-    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
-    hadDataOnce = false; prevDevConn = false; disconnectCount = 0;
+void finalizeSession(SessionEndReason reason, const char* source,
+                     bool recovered, bool wasOverload,
+                     bool turnRelayOff, float finalPower) {
+    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
+    const char* reasonText = sessionEndReasonToString(reason);
+    const char* sourceText = source && strlen(source) > 0 ? source : reasonText;
+    float snapshotPower = finalPower >= 0.0f ? finalPower : lastP;
+    if (snapshotPower <= 0.0f && sessionData.power > 0.0f) snapshotPower = sessionData.power;
+
+    sessionData.endReason = reason;
+    syncSessionDataFromLegacy(nowTs);
+    setSessionState(SessionState::FINISHED, sourceText);
+
+    bool hasSessionData = sessionActive && hadDataOnce &&
+                          (sessionKwh > 0.0f || sessionEnergyWh > 0.0f || sessionData.energy > 0.0f);
+    if (hasSessionData) {
+        archiveCurrentSession(nowTs, snapshotPower, recovered, wasOverload, reason);
+    } else {
+        Serial.printf("[Session] Finalize without history (%s): active=%d hadData=%d kWh=%.4f\n",
+                      reasonText, sessionActive, hadDataOnce, sessionKwh);
+    }
+
+    if (turnRelayOff && relayOn) {
+        setRelay(false, sourceText);
+    } else {
+        sessionActive = false;
+        loadCheckPending = false;
+        loadCheckStartedMs = 0;
+        loadDetectStableCount = 0;
+        loadRemovedSinceMs = 0;
+        recoveredSessionPending = false;
+        recoveredNoDeviceCount = 0;
+        fsClearSession();
+    }
+
+    sessionEnergyWh = 0;
+    sessionKwh = 0;
+    sessionCost = 0;
+    hadDataOnce = false;
+    prevDevConn = false;
+    disconnectCount = 0;
+    deviceConnected = false;
+    overloadWarning = false;
+    isOverload = false;
     sessionDeviceName[0] = '\0';
     currentSessionId[0] = '\0';
     saveSessionId();
+
+    sessionData.endReason = reason;
+    syncSessionDataFromLegacy(nowTs);
+    setSessionState(SessionState::FINISHED, sourceText);
+
+    if (wifiConnected && WiFi.status() == WL_CONNECTED) {
+        sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, wasOverload, false, nowTs);
+    }
 }
 
-static bool finalizeMissingLoadOnReconnect(unsigned long nowTs) {
+static bool finalizeMissingLoadOnReconnect() {
     if (!relayOn || !sessionActive || !hadDataOnce || deviceConnected) return false;
     if (loadCheckPending || recoveredSessionPending) return false;
     if (!prevDevConn && disconnectCount == 0) return false;
 
     Serial.println("[Reconnect] Load missing, finalizing active session");
-    archiveCurrentSession(nowTs, lastP, false, false, SESSION_END_LOAD_REMOVED);
-    clearFinishedSession("load missing after reconnect");
-    syncSessionDataFromLegacy(nowTs);
-    sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, false, false, nowTs);
+    finalizeSession(SESSION_END_LOAD_REMOVED, "load missing after reconnect");
     return true;
 }
 
 void handleReconnectResync() {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return;
 
-    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-
-    if (finalizeMissingLoadOnReconnect(nowTs)) {
+    if (finalizeMissingLoadOnReconnect()) {
         return;
     }
 
@@ -429,20 +468,9 @@ void handleRecoveredSessionCheck() {
 
     if (recoveredNoDeviceCount < DISCONNECT_THRESHOLD) return;
 
-    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
     Serial.println("[Recovery] Device tidak ada, arsipkan checkpoint terakhir");
-    archiveCurrentSession(nowTs, lastP, true, false, SESSION_END_RECOVERY_MISSING_DEVICE);
-    if (wifiConnected) {
-        sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, false, nowTs);
-    }
-
-    setRelay(false, "recovered device missing");
-    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
-    hadDataOnce = false; prevDevConn = false;
-    sessionDeviceName[0] = '\0';
-    currentSessionId[0] = '\0';
-    sessionData.endReason = SESSION_END_NONE;
-    saveSessionId();
+    finalizeSession(SESSION_END_RECOVERY_MISSING_DEVICE, "recovered device missing",
+                    true, false, true, lastP);
 }
 
 // ================================================================
@@ -480,24 +508,10 @@ void handleLoadRemovedDuringMonitoring(float current, float power) {
 
     if (missingMs < LOAD_REMOVED_DEBOUNCE_MS) return;
 
-    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
     Serial.println("[Disconnect] Load removed - finalizing session locally");
 
-    sessionData.endReason = SESSION_END_LOAD_REMOVED;
-    setSessionState(SessionState::FINISHED, "load removed");
-    archiveCurrentSession(nowTs, lastP, false, false, SESSION_END_LOAD_REMOVED);
-
-    setRelay(false, "load removed");
-    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
-    hadDataOnce = false; prevDevConn = false; deviceConnected = false;
-    sessionDeviceName[0] = '\0';
-    currentSessionId[0] = '\0';
-    saveSessionId();
+    finalizeSession(SESSION_END_LOAD_REMOVED, "load removed", false, false, true, lastP);
     oledStatus("Load removed", "Session saved");
-
-    if (wifiConnected) {
-        sendToFirebase(0, 0, 0, 0, 0, 0, 0, false, false, false, nowTs);
-    }
 }
 
 void handleDeviceDisconnect() {
@@ -507,17 +521,7 @@ void handleDeviceDisconnect() {
         Serial.printf("[Disconnect] %d/%d\n", disconnectCount, DISCONNECT_THRESHOLD);
         if (disconnectCount >= DISCONNECT_THRESHOLD) {
             Serial.println("[Disconnect] ✓ Device dicabut — simpan sesi, relay OFF");
-            unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
-            archiveCurrentSession(nowTs, lastP, false, false, SESSION_END_LOAD_REMOVED);
-            if (wifiConnected) {
-                sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, false, false, nowTs);
-            }
-
-            setRelay(false, "device dicabut");
-            sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
-            hadDataOnce = false; sessionDeviceName[0] = '\0';
-            currentSessionId[0] = '\0';
-            saveSessionId();
+            finalizeSession(SESSION_END_LOAD_REMOVED, "device dicabut", false, false, true, lastP);
         }
     } else if (deviceConnected) {
         disconnectCount = 0;
@@ -554,7 +558,6 @@ void handleOverload(float power) {
     setSessionState(SessionState::OVERLOAD, "power threshold exceeded");
     Serial.printf("[Overload] %.1fW >= %.0fW - relay OFF immediately\n", power, threshold);
 
-    unsigned long nowTs = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
     fsWriteSession();
 
     relayOn = false;
@@ -570,19 +573,8 @@ void handleOverload(float power) {
     overloadLingerStart = millis();
     indicatorsResetAlertPattern();
 
-    archiveCurrentSession(nowTs, power, false, true, SESSION_END_OVERLOAD);
-    sessionActive = false;
-    if (wifiConnected) {
-        sendToFirebase(0, 0, 0, 0, 0, sessionKwh, sessionCost, false, true, false, nowTs);
-    }
-
-    isOverload = false;
-    sessionEnergyWh = 0; sessionKwh = 0; sessionCost = 0;
-    hadDataOnce = false; prevDevConn = false;
-    sessionDeviceName[0] = '\0';
-    currentSessionId[0] = '\0';
-    saveSessionId();
-    fsClearSession();
+    finalizeSession(SESSION_END_OVERLOAD, "power threshold exceeded",
+                    false, true, false, power);
 }
 
 // ================================================================
