@@ -22,6 +22,7 @@
 
 #define FIREBASE_HOST "https://smart-energy-monitor-v2-de79d-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define FIREBASE_PATH "/live.json"
+#define DEVICE_ID "esp32-smart-energy-001"
 
 // ── LittleFS Paths ───────────────────────────────────────────────
 #define FS_SESSION_PATH  "/session_active.json"

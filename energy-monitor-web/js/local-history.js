@@ -1,6 +1,7 @@
-import { db, ref, get } from "./firebase-config.js";
+import { db, ref, get, set, update } from "./firebase-config.js";
 
 const LOCAL_FETCH_TIMEOUT_MS = 1500;
+const DEFAULT_DEVICE_ID = "esp32-smart-energy-001";
 
 function toTimestampMs(value) {
   const n = Number(value || 0);
@@ -19,7 +20,17 @@ function formatCost(value) {
   return `Rp ${Math.round(n).toLocaleString("id-ID")}`;
 }
 
+function formatDuration(value) {
+  if (typeof value === "string" && value.includes(":")) return value;
+  const secs = Math.max(0, Number(value || 0));
+  const h = String(Math.floor(secs / 3600)).padStart(2, "0");
+  const m = String(Math.floor((secs % 3600) / 60)).padStart(2, "0");
+  const s = String(Math.floor(secs % 60)).padStart(2, "0");
+  return `${h}:${m}:${s}`;
+}
+
 function historyIdentity(session) {
+  if (session.id) return `sid:${session.id}`;
   if (session.sessionId) return `sid:${session.sessionId}`;
   if (session.timestamp) return `ts:${Math.round(session.timestamp / 1000)}:${session.name || ""}`;
   return `key:${session._key || Math.random().toString(36).slice(2)}`;
@@ -31,7 +42,11 @@ function normalizeFirebaseHistory(raw) {
     ...val,
     _key: key,
     _source: "firebase",
-    timestamp: Number(val.timestamp || 0)
+    id: val.id || val.sessionId || key,
+    sessionId: val.sessionId || val.id || key,
+    duration: formatDuration(val.durationSec ?? val.duration),
+    cost: val.costText || formatCost(val.cost),
+    timestamp: Number(val.timestamp || val.endTime || 0)
   }));
 }
 
@@ -46,11 +61,13 @@ function normalizeLocalHistory(entries) {
       ...entry,
       _key: `local_${keySeed}`,
       _source: "local",
+      id: entry.id || entry.sessionId || String(keySeed),
+      sessionId: entry.sessionId || entry.id || String(keySeed),
       name: entry.name || "Device",
-      duration: entry.duration || "00:00:00",
+      duration: formatDuration(entry.durationSec ?? entry.duration),
       power: Number(entry.power || 0),
       energy: Number(entry.energy ?? entry.kwh ?? 0),
-      cost: formatCost(entry.cost),
+      cost: entry.costText || formatCost(entry.cost),
       date: entry.date || formatDate(timestamp),
       timestamp,
       pendingSync: entry.pendingSync !== false
@@ -71,6 +88,87 @@ async function getEspHistoryUrl(uid) {
 
   const cachedIp = localStorage.getItem(`sem_esp_ip_${uid}`);
   return cachedIp ? `http://${cachedIp}/history` : "";
+}
+
+async function getDeviceId(uid) {
+  try {
+    const snap = await get(ref(db, "live/system"));
+    const sys = snap.exists() ? snap.val() : {};
+    const deviceId = sys.deviceId || sys.deviceID || "";
+    if (deviceId) {
+      localStorage.setItem(`sem_device_id_${uid}`, deviceId);
+      return deviceId;
+    }
+  } catch {}
+
+  return localStorage.getItem(`sem_device_id_${uid}`) || DEFAULT_DEVICE_ID;
+}
+
+function normalizeCompletedSession(session, sessionId, deviceId) {
+  const timestamp = Number(session.timestamp || session.endTime || Date.now());
+  return {
+    ...session,
+    id: session.id || sessionId,
+    sessionId: session.sessionId || session.id || sessionId,
+    deviceId: session.deviceId || deviceId,
+    name: session.name || "Device",
+    duration: formatDuration(session.durationSec ?? session.duration),
+    power: Number(session.power || 0),
+    energy: Number(session.energy || 0),
+    cost: Number(session.cost || 0),
+    costText: session.costText || formatCost(session.cost),
+    date: session.date || formatDate(timestamp),
+    timestamp,
+    syncStatus: "SYNCED",
+    pendingSync: false,
+    createdFrom: session.createdFrom || "ESP32"
+  };
+}
+
+async function markCompletedSessionSynced(deviceId, sessionId, uid) {
+  try {
+    await update(ref(db, `devices/${deviceId}/completedSessions/${sessionId}`), {
+      syncStatus: "SYNCED",
+      pendingSync: false,
+      syncedBy: uid,
+      syncedAt: Date.now(),
+      [`copiedToUsers/${uid}`]: true
+    });
+  } catch (e) {
+    console.warn("[History] User history saved, but queue status update failed:", e?.message || e);
+  }
+}
+
+async function importCompletedSessionsToUserHistory(uid) {
+  const deviceId = await getDeviceId(uid);
+  try {
+    const queueSnap = await get(ref(db, `devices/${deviceId}/completedSessions`));
+    if (!queueSnap.exists()) return 0;
+
+    let copied = 0;
+    const sessions = queueSnap.val() || {};
+    for (const [key, session] of Object.entries(sessions)) {
+      if (!session || typeof session !== "object") continue;
+      const sessionId = session.id || session.sessionId || key;
+      if (!sessionId || session.syncStatus === "SYNCED") continue;
+      if (session.copiedToUsers?.[uid] === true) continue;
+
+      const userHistoryRef = ref(db, `users/${uid}/history/${sessionId}`);
+      const existing = await get(userHistoryRef);
+      if (existing.exists()) {
+        await markCompletedSessionSynced(deviceId, key, uid);
+        continue;
+      }
+
+      await set(userHistoryRef, normalizeCompletedSession(session, sessionId, deviceId));
+      await markCompletedSessionSynced(deviceId, key, uid);
+      copied++;
+    }
+    return copied;
+  } catch (e) {
+    console.warn("[History] Completed-session import skipped:", e?.message || e);
+    return 0;
+  }
 }
 
 async function fetchLocalHistory(uid) {
@@ -102,6 +200,8 @@ async function fetchFirebaseHistory(uid) {
 }
 
 export async function loadDeviceHistory(uid) {
+  await importCompletedSessionsToUserHistory(uid);
+
   const [local, firebase] = await Promise.all([
     fetchLocalHistory(uid),
     fetchFirebaseHistory(uid)
@@ -111,7 +211,7 @@ export async function loadDeviceHistory(uid) {
   local.forEach(session => merged.set(historyIdentity(session), session));
   firebase.forEach(session => {
     const key = historyIdentity(session);
-    if (!merged.has(key)) merged.set(key, session);
+    merged.set(key, session);
   });
 
   return [...merged.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));

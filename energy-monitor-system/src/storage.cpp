@@ -323,9 +323,39 @@ static size_t fsHistoryJsonCapacity() {
 static int countPendingHistory(JsonArray arr) {
     int pending = 0;
     for (JsonObject entry : arr) {
-        if (entry["pendingSync"] | true) pending++;
+        const char* syncStatus = entry["syncStatus"] | "";
+        bool explicitPending = entry.containsKey("pendingSync")
+            ? (entry["pendingSync"] | false)
+            : (strcmp(syncStatus, "QUEUED") != 0 && strcmp(syncStatus, "SYNCED") != 0);
+        if (explicitPending) pending++;
     }
     return pending;
+}
+
+static String historyIdFromSession(unsigned long endTs) {
+    if (strlen(currentSessionId) > 0) return String(currentSessionId);
+    unsigned long long fallbackId = (unsigned long long)endTs * 1000ULL;
+    char out[24];
+    snprintf(out, sizeof(out), "%llu", fallbackId);
+    return String(out);
+}
+
+static String timestampMsString(unsigned long ts) {
+    unsigned long long value = (unsigned long long)ts * 1000ULL;
+    char out[24];
+    snprintf(out, sizeof(out), "%llu", value);
+    return String(out);
+}
+
+static String formatIsoDate(unsigned long ts) {
+    if (!ntpSynced || ts <= 1000000) return "-";
+    struct tm ti;
+    time_t t = (time_t)ts;
+    localtime_r(&t, &ti);
+    char out[16];
+    snprintf(out, sizeof(out), "%04d-%02d-%02d",
+             ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+    return String(out);
 }
 
 bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
@@ -353,10 +383,12 @@ bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
     const char* reasonText = endReason && strlen(endReason) > 0 ? endReason : "NORMAL_STOP";
     for (JsonObject existing : arr) {
         const char* existingSessionId = existing["sessionId"] | "";
+        const char* existingId = existing["id"] | "";
         unsigned long existingStart = existing["start_ts"] | (unsigned long)0;
         const char* existingReason = existing["endReason"] | "";
         bool sameSessionId = strlen(currentSessionId) > 0 &&
-                             strcmp(existingSessionId, currentSessionId) == 0;
+                             (strcmp(existingSessionId, currentSessionId) == 0 ||
+                              strcmp(existingId, currentSessionId) == 0);
         bool sameFallback = strlen(currentSessionId) == 0 &&
                             existingStart == startTs &&
                             strcmp(existingReason, reasonText) == 0;
@@ -369,20 +401,41 @@ bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
     }
 
     JsonObject entry = arr.createNestedObject();
+    String entryId = historyIdFromSession(endTs);
+    String startMs = timestampMsString(startTs);
+    String endMs = timestampMsString(endTs);
+    String dateStr = formatIsoDate(endTs);
+
+    entry["id"]       = entryId;
+    entry["deviceId"] = DEVICE_ID;
     entry["name"]     = name;
     entry["start_ts"] = startTs;
     entry["end_ts"]   = endTs;
     entry["duration"] = buildDuration(startTs, endTs);
+    entry["durationSec"] = (endTs > startTs) ? (endTs - startTs) : 0;
+    entry["startTime"] = startMs;
+    entry["endTime"] = endMs;
+    entry["date"] = dateStr;
+    entry["timestamp"] = endMs;
     entry["kwh"]      = energyKwh;
     entry["energy"]   = energyKwh;
     entry["cost"]     = cost;
     entry["power"]    = avgPower;
+    entry["voltage"] = lastV;
+    entry["current"] = lastI;
+    entry["frequency"] = lastHz;
+    entry["powerFactor"] = lastPF;
+    entry["tariff"] = appConfig.electricityCostPerKwh;
     entry["overload"] = wasOverload;
+    entry["overloadThreshold"] = appConfig.overloadThreshold;
     entry["recovered"] = recovered;
     entry["pendingSync"] = true;
+    entry["syncStatus"] = "PENDING";
     entry["endReason"] = reasonText;
-    entry["uid"]      = currentUid;
-    entry["sessionId"] = currentSessionId;
+    entry["startMode"] = (sessionData.mode == SESSION_MODE_OFFLINE) ? "OFFLINE" : "ONLINE";
+    entry["endMode"] = systemModeToString(systemMode);
+    entry["createdFrom"] = "ESP32";
+    entry["sessionId"] = strlen(currentSessionId) > 0 ? currentSessionId : entryId.c_str();
 
     File f = LittleFS.open(FS_HISTORY_PATH, "w");
     if (!f) {
@@ -407,11 +460,6 @@ bool fsAppendOfflineHistory(const char* name, unsigned long startTs,
 bool fsSyncOfflineHistoryToFirebase() {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
     if (!LittleFS.exists(FS_HISTORY_PATH)) return true;
-    if (!firebaseHasAuthToken()) {
-        Serial.printf("[Sync] Firebase sync skipped: no auth token pending=%d local=%d\n",
-                      fsCountOfflineHistory(), fsCountLocalHistory());
-        return false;
-    }
 
     File f = LittleFS.open(FS_HISTORY_PATH, "r");
     if (!f) return false;
@@ -448,7 +496,11 @@ bool fsSyncOfflineHistoryToFirebase() {
 
     int pushed = 0;
     for (JsonObject entry : arr) {
-        if (!(entry["pendingSync"] | true)) continue;
+        const char* syncStatus = entry["syncStatus"] | "";
+        bool shouldSync = entry.containsKey("pendingSync")
+            ? (entry["pendingSync"] | false)
+            : (strcmp(syncStatus, "QUEUED") != 0 && strcmp(syncStatus, "SYNCED") != 0);
+        if (!shouldSync) continue;
 
         const char*   name    = entry["name"]     | "Offline Device";
         unsigned long startTs = entry["start_ts"] | (unsigned long)0;
@@ -459,26 +511,20 @@ bool fsSyncOfflineHistoryToFirebase() {
         bool          wasOvl  = entry["overload"] | false;
         bool          recovered = entry["recovered"] | false;
         const char*   reason  = entry["endReason"] | (wasOvl ? "OVERLOAD" : "NORMAL_STOP");
-        const char*   uid     = entry["uid"]      | "";
         const char*   sessId  = entry["sessionId"] | "";
 
-        if (strlen(uid) > 0) strlcpy(currentUid, uid, sizeof(currentUid));
         if (strlen(sessId) > 0) strlcpy(currentSessionId, sessId, sizeof(currentSessionId));
-        if (strlen(currentUid) == 0) {
-            Serial.printf("[Sync] '%s' belum punya uid, tetap pending agar tidak hilang dari web history\n",
-                          name);
-            break;
-        }
 
         String dur = buildDuration(startTs, endTs);
         bool ok = pushHistoryToFirebase(name, dur.c_str(), avgPwr, kwh, cost,
-                                        endTs > 0 ? endTs : startTs,
+                                        startTs, endTs > 0 ? endTs : startTs,
                                         recovered, wasOvl, reason);
         if (!ok) {
             Serial.printf("[Sync] Push '%s' gagal — berhenti\n", name);
             break;
         }
         entry["pendingSync"] = false;
+        entry["syncStatus"] = "QUEUED";
         entry["syncedAt"] = ntpSynced ? (unsigned long)time(nullptr) : millis() / 1000;
         pushed++;
         delay(300);

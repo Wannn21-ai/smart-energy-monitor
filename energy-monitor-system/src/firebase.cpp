@@ -96,6 +96,7 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
     j += ",\"endReason\":\"";    j += sessionEndReasonToString(sessionData.endReason); j += "\"";
     j += ",\"uid\":\"";         j += jsonEscape(currentUid); j += "\"";
     j += ",\"sessionId\":\"";   j += jsonEscape(currentSessionId); j += "\"";
+    j += ",\"deviceId\":\"";    j += jsonEscape(DEVICE_ID); j += "\"";
     j += ",\"deviceName\":\"";  j += jsonEscape(sessionDeviceName); j += "\"";
     j += ",\"pendingSync\":";  j += String(pendingSync);
     j += "},";
@@ -125,21 +126,17 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
 // ================================================================
 bool pushHistoryToFirebase(const char* name, const char* duration,
                            float avgPower, float energyKwh, float cost,
-                           unsigned long ts, bool recovered, bool wasOverload,
+                           unsigned long startTs, unsigned long endTs,
+                           bool recovered, bool wasOverload,
                            const char* endReason) {
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) return false;
-    if (strlen(currentUid) == 0) {
-        Serial.println("[History] Push ditahan: uid kosong, history tetap pending lokal");
-        return false;
-    }
-
     char dateStr[20] = "—";
-    if (ntpSynced && ts > 1000000) {
+    if (ntpSynced && endTs > 1000000) {
         struct tm ti;
-        time_t t = (time_t)ts;
+        time_t t = (time_t)endTs;
         localtime_r(&t, &ti);
-        snprintf(dateStr, sizeof(dateStr), "%02d/%02d/%04d",
-                 ti.tm_mday, ti.tm_mon + 1, ti.tm_year + 1900);
+        snprintf(dateStr, sizeof(dateStr), "%04d-%02d-%02d",
+                 ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
     }
 
     char costStr[32];
@@ -161,48 +158,64 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
                  name, recovered ? " Recovered" : "");
     }
 
-    unsigned long long historyKey = (unsigned long long)ts * 1000ULL;
+    unsigned long long historyKey = (unsigned long long)endTs * 1000ULL;
     char historyKeyStr[24];
     snprintf(historyKeyStr, sizeof(historyKeyStr), "%llu", historyKey);
+    const char* sessionKey = strlen(currentSessionId) > 0 ? currentSessionId : historyKeyStr;
     char path[192];
-    snprintf(path, sizeof(path), "/users/%s/history/%s.json", currentUid, historyKeyStr);
+    snprintf(path, sizeof(path), "/devices/%s/completedSessions/%s.json", DEVICE_ID, sessionKey);
 
     WiFiClientSecure c; c.setInsecure(); c.setTimeout(10000);
     HTTPClient h;
     String authQuery = firebaseAuthQuery();
-    if (authQuery.length() == 0) {
-        Serial.println("[History] Firebase sync skipped: no auth token");
-        return false;
-    }
     h.begin(c, String(FIREBASE_HOST) + String(path) + authQuery);
     h.addHeader("Content-Type", "application/json");
 
     String safeName = jsonEscape(displayName);
     String safeDuration = jsonEscape(duration);
-    String safeSessionId = jsonEscape(currentSessionId);
+    String safeSessionId = jsonEscape(sessionKey);
     String safeEndReason = jsonEscape(endReason && strlen(endReason) > 0 ? endReason : "NORMAL_STOP");
+    String safeEndMode = jsonEscape(systemModeToString(systemMode));
+    unsigned long durationSec = (endTs > startTs) ? (endTs - startTs) : 0;
+    unsigned long long startMs = (unsigned long long)startTs * 1000ULL;
+    unsigned long long endMs = (unsigned long long)endTs * 1000ULL;
+    char startMsStr[24];
+    char endMsStr[24];
+    snprintf(startMsStr, sizeof(startMsStr), "%llu", startMs);
+    snprintf(endMsStr, sizeof(endMsStr), "%llu", endMs);
 
-    char body[640];
+    char body[1400];
     snprintf(body, sizeof(body),
-        "{\"name\":\"%s\",\"duration\":\"%s\",\"power\":%.1f,"
-        "\"energy\":%.4f,\"cost\":\"%s\",\"date\":\"%s\","
-        "\"timestamp\":%s,\"isOverload\":%s,\"recovered\":%s,"
-        "\"sessionId\":\"%s\",\"endReason\":\"%s\"}",
-        safeName.c_str(), safeDuration.c_str(), avgPower,
-        energyKwh, costStr, dateStr,
-        historyKeyStr,
+        "{\"id\":\"%s\",\"sessionId\":\"%s\",\"deviceId\":\"%s\","
+        "\"name\":\"%s\",\"voltage\":%.1f,\"current\":%.2f,\"power\":%.1f,"
+        "\"energy\":%.4f,\"frequency\":%.1f,\"powerFactor\":%.2f,"
+        "\"cost\":%.2f,\"costText\":\"%s\",\"tariff\":%.2f,"
+        "\"duration\":\"%s\",\"durationSec\":%lu,"
+        "\"startTime\":%s,\"endTime\":%s,\"date\":\"%s\",\"timestamp\":%s,"
+        "\"startMode\":\"%s\",\"endMode\":\"%s\",\"endReason\":\"%s\","
+        "\"overload\":%s,\"isOverload\":%s,\"overloadThreshold\":%.0f,"
+        "\"recovered\":%s,\"pendingSync\":true,\"syncStatus\":\"PENDING\","
+        "\"createdFrom\":\"ESP32\"}",
+        safeSessionId.c_str(), safeSessionId.c_str(), DEVICE_ID,
+        safeName.c_str(), lastV, lastI, avgPower,
+        energyKwh, lastHz, lastPF,
+        cost, costStr, appConfig.electricityCostPerKwh,
+        safeDuration.c_str(), durationSec,
+        startMsStr, endMsStr, dateStr, endMsStr,
+        (sessionData.mode == SESSION_MODE_OFFLINE) ? "OFFLINE" : "ONLINE",
+        safeEndMode.c_str(), safeEndReason.c_str(),
         wasOverload ? "true" : "false",
-        recovered   ? "true" : "false",
-        safeSessionId.c_str(),
-        safeEndReason.c_str());
+        wasOverload ? "true" : "false",
+        appConfig.overloadThreshold,
+        recovered   ? "true" : "false");
 
     int code = h.PUT(body);
     h.end();
-    Serial.printf("[History] Firebase target /users/%s/history/%s endReason=%s\n",
-                  currentUid, historyKeyStr, safeEndReason.c_str());
+    Serial.printf("[History] Firebase target /devices/%s/completedSessions/%s endReason=%s\n",
+                  DEVICE_ID, sessionKey, safeEndReason.c_str());
     Serial.printf("[History] Push '%s' → %d\n", displayName, code);
     if (code == 401) {
-        Serial.println("[History] Push unauthorized (401): auth token missing, expired, or uid not allowed");
+        Serial.println("[History] Queue push unauthorized (401): check device queue rules/auth");
     }
     return (code == 200 || code == 201 || code == 204);
 }
