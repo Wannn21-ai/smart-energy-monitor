@@ -21,8 +21,9 @@
 #define AP_PASS  "12345678"
 
 #define FIREBASE_HOST "https://smart-energy-monitor-v2-de79d-default-rtdb.asia-southeast1.firebasedatabase.app"
-#define FIREBASE_PATH "/live.json"
 #define DEVICE_ID "esp32-smart-energy-001"
+#define FIREBASE_PATH "/devices/" DEVICE_ID "/live.json"
+#define FIREBASE_CONFIG_PATH "/devices/" DEVICE_ID "/config.json"
 
 // ── LittleFS Paths ───────────────────────────────────────────────
 #define FS_SESSION_PATH  "/session_active.json"
@@ -31,6 +32,10 @@
 // ── Default Values ───────────────────────────────────────────────
 #define TARIF_DEFAULT     1444.70f
 #define THRESHOLD_DEFAULT 2000.0f
+#define CURRENCY_DEFAULT  "IDR"
+#define OVERLOAD_WARNING_PERCENT_DEFAULT 99.0f
+#define OFFLINE_TIMEOUT_SEC_DEFAULT      300UL
+#define CHECKPOINT_INTERVAL_SEC_DEFAULT  30UL
 
 // ── Timing Constants (ms) ────────────────────────────────────────
 #define LOOP_INTERVAL              5000UL

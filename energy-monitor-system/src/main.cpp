@@ -80,7 +80,7 @@ void setup() {
 
     // ── Detect startup mode ──────────────────────────────────────
     oledStatus("Checking WiFi...", "");
-    wifiConnected = tryConnectWiFi(WIFI_OFFLINE_GRACE_MS / 1000UL);
+    wifiConnected = tryConnectWiFi(appConfig.offlineTimeoutSec);
 
     if (wifiConnected) {
         // ★ ONLINE MODE
@@ -150,8 +150,8 @@ void loop() {
     }
 
     if (!wifiConnected && !modeOffline && wifiLostSinceMs > 0 &&
-        (now - wifiLostSinceMs >= WIFI_OFFLINE_GRACE_MS)) {
-        transitionToOfflineMode("wifi lost for 5 minutes");
+        (now - wifiLostSinceMs >= appConfig.offlineTimeoutSec * 1000UL)) {
+        transitionToOfflineMode("wifi lost timeout");
     }
 
     // ── Auto-reconnect setiap 60s ─────────────────────────────────
@@ -216,7 +216,8 @@ void loop() {
     if (isnan(pf))        pf        = 0;
     if (isnan(frequency)) frequency = 0;
 
-    deviceConnected = (current >= LOAD_MIN_CURRENT && power >= LOAD_MIN_POWER);
+    deviceConnected = (current >= appConfig.loadCurrentThreshold &&
+                       power >= appConfig.loadPowerThreshold);
     if (deviceConnected) {
         lastV = voltage; lastI = current; lastP = power;
         lastPF = pf; lastHz = frequency; hadDataOnce = true;
@@ -237,7 +238,8 @@ void loop() {
     }
 
     // Checkpoint
-    if (sessionActive && hadDataOnce && (now - lastCheckpointMs >= CHECKPOINT_INTERVAL)) {
+    if (sessionActive && hadDataOnce &&
+        (now - lastCheckpointMs >= appConfig.checkpointIntervalSec * 1000UL)) {
         lastCheckpointMs = now;
         fsWriteSession();
     }

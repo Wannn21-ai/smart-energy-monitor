@@ -85,6 +85,13 @@ bool sendToFirebase(float v, float i, float p, float pf, float freq,
     j += ",\"ip\":\"";          j += WiFi.localIP().toString(); j += "\"";
     j += ",\"threshold\":"     + String(appConfig.overloadThreshold, 0);
     j += ",\"tarif\":"         + String(appConfig.electricityCostPerKwh, 2);
+    j += ",\"currency\":\"";    j += jsonEscape(appConfig.currency); j += "\"";
+    j += ",\"overloadWarningPercent\":" + String(appConfig.overloadWarningPercent, 1);
+    j += ",\"loadPowerThreshold\":" + String(appConfig.loadPowerThreshold, 2);
+    j += ",\"loadCurrentThreshold\":" + String(appConfig.loadCurrentThreshold, 3);
+    j += ",\"loadRemovedDelaySec\":" + String(appConfig.loadRemovedDelaySec);
+    j += ",\"offlineTimeoutSec\":" + String(appConfig.offlineTimeoutSec);
+    j += ",\"checkpointIntervalSec\":" + String(appConfig.checkpointIntervalSec);
     j += ",\"relay\":"         + String(relay ? "true" : "false");
     j += ",\"offline\":"       + String(modeOffline ? "true" : "false");
     j += ",\"sessionActive\":" + String(sessionActive ? "true" : "false");
@@ -189,7 +196,7 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
         "{\"id\":\"%s\",\"sessionId\":\"%s\",\"deviceId\":\"%s\","
         "\"name\":\"%s\",\"voltage\":%.1f,\"current\":%.2f,\"power\":%.1f,"
         "\"energy\":%.4f,\"frequency\":%.1f,\"powerFactor\":%.2f,"
-        "\"cost\":%.2f,\"costText\":\"%s\",\"tariff\":%.2f,"
+        "\"cost\":%.2f,\"costText\":\"%s\",\"tariff\":%.2f,\"currency\":\"%s\","
         "\"duration\":\"%s\",\"durationSec\":%lu,"
         "\"startTime\":%s,\"endTime\":%s,\"date\":\"%s\",\"timestamp\":%s,"
         "\"startMode\":\"%s\",\"endMode\":\"%s\",\"endReason\":\"%s\","
@@ -199,7 +206,7 @@ bool pushHistoryToFirebase(const char* name, const char* duration,
         safeSessionId.c_str(), safeSessionId.c_str(), DEVICE_ID,
         safeName.c_str(), lastV, lastI, avgPower,
         energyKwh, lastHz, lastPF,
-        cost, costStr, appConfig.electricityCostPerKwh,
+        cost, costStr, appConfig.electricityCostPerKwh, appConfig.currency,
         safeDuration.c_str(), durationSec,
         startMsStr, endMsStr, dateStr, endMsStr,
         (sessionData.mode == SESSION_MODE_OFFLINE) ? "OFFLINE" : "ONLINE",
@@ -228,47 +235,51 @@ void syncConfigFromFirebase() {
 
     WiFiClientSecure c; c.setInsecure(); c.setTimeout(8000);
     HTTPClient h;
-    if (h.begin(c, String(FIREBASE_HOST) + "/config/app.json")) {
-        if (h.GET() == 200) {
-            String pl = h.getString(); pl.trim();
-            if (pl != "null" && pl.length() > 0) {
-                StaticJsonDocument<256> doc;
-                if (!deserializeJson(doc, pl) && doc.is<JsonObject>()) {
-                    AppConfig next = appConfig;
-                    float threshold = doc["overloadThreshold"] | 0.0f;
-                    if (threshold <= 0) threshold = doc["threshold"] | 0.0f;
-                    float cost = doc["electricityCostPerKwh"] | 0.0f;
-                    if (cost <= 0) cost = doc["tariff"] | 0.0f;
-                    if (cost <= 0) cost = doc["tarif"] | 0.0f;
-                    if (threshold > 0) next.overloadThreshold = threshold;
-                    if (cost > 0) next.electricityCostPerKwh = cost;
-                    if (setAppConfig(next, "firebase config")) {
-                        Serial.printf("[Config] Updated: %.0fW %.2f/kWh\n",
-                                      appConfig.overloadThreshold,
-                                      appConfig.electricityCostPerKwh);
-                    }
-                    h.end();
-                    return;
+    if (!h.begin(c, String(FIREBASE_HOST) + String(FIREBASE_CONFIG_PATH))) return;
+    if (h.GET() == 200) {
+        String pl = h.getString(); pl.trim();
+        if (pl != "null" && pl.length() > 0) {
+            StaticJsonDocument<768> doc;
+            if (!deserializeJson(doc, pl) && doc.is<JsonObject>()) {
+                AppConfig next = appConfig;
+
+                float tariff = doc["tariff"] | 0.0f;
+                if (tariff <= 0) tariff = doc["electricityCostPerKwh"] | 0.0f;
+                if (tariff <= 0) tariff = doc["tarif"] | 0.0f;
+
+                float threshold = doc["overloadThreshold"] | 0.0f;
+                float warningPercent = doc["overloadWarningPercent"] | 0.0f;
+                float loadPower = doc["loadPowerThreshold"] | 0.0f;
+                float loadCurrent = doc["loadCurrentThreshold"] | 0.0f;
+                unsigned long loadRemovedSec = doc["loadRemovedDelaySec"] | 0UL;
+                unsigned long offlineSec = doc["offlineTimeoutSec"] | 0UL;
+                unsigned long checkpointSec = doc["checkpointIntervalSec"] | 0UL;
+
+                if (tariff > 0) next.electricityCostPerKwh = tariff;
+                if (threshold > 0) next.overloadThreshold = threshold;
+                if (warningPercent > 0) next.overloadWarningPercent = warningPercent;
+                if (loadPower > 0) next.loadPowerThreshold = loadPower;
+                if (loadCurrent > 0) next.loadCurrentThreshold = loadCurrent;
+                if (loadRemovedSec > 0) next.loadRemovedDelaySec = loadRemovedSec;
+                if (offlineSec > 0) next.offlineTimeoutSec = offlineSec;
+                if (checkpointSec > 0) next.checkpointIntervalSec = checkpointSec;
+
+                const char* currency = doc["currency"] | "";
+                if (strlen(currency) > 0) {
+                    strlcpy(next.currency, currency, sizeof(next.currency));
+                }
+
+                if (setAppConfig(next, "firebase device config")) {
+                    Serial.printf("[Config] Updated from /devices/%s/config: %.0fW %.2f/kWh %s\n",
+                                  DEVICE_ID,
+                                  appConfig.overloadThreshold,
+                                  appConfig.electricityCostPerKwh,
+                                  appConfig.currency);
                 }
             }
         }
-        h.end();
     }
-
-    WiFiClientSecure c2; c2.setInsecure(); c2.setTimeout(8000);
-    HTTPClient h2;
-    if (!h2.begin(c2, String(FIREBASE_HOST) + "/config/threshold.json")) return;
-    if (h2.GET() == 200) {
-        String pl = h2.getString(); pl.trim();
-        if (pl != "null" && pl.length() > 0) {
-            float v = pl.toFloat();
-            if (v > 0 && v != appConfig.overloadThreshold) {
-                setOverloadThreshold(v, "firebase config");
-                Serial.printf("[Threshold] Updated: %.0fW\n", v);
-            }
-        }
-    }
-    h2.end();
+    h.end();
 }
 
 // ================================================================

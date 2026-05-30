@@ -94,19 +94,59 @@ static bool validElectricityCost(float costPerKwh) {
     return costPerKwh > 0.0f;
 }
 
+static bool validPercent(float percent) {
+    return percent > 0.0f && percent <= 100.0f;
+}
+
+static bool validPositiveFloat(float value) {
+    return value > 0.0f;
+}
+
+static bool validPositiveSeconds(unsigned long value) {
+    return value > 0UL && value <= 3600UL;
+}
+
 void loadPrefs() {
     prefs.begin("sem", true);
     appConfig.overloadThreshold     = prefs.getFloat("threshold", THRESHOLD_DEFAULT);
     appConfig.electricityCostPerKwh = prefs.getFloat("tarif",     TARIF_DEFAULT);
+    prefs.getString("currency", appConfig.currency, sizeof(appConfig.currency));
+    appConfig.overloadWarningPercent = prefs.getFloat("warnPct", OVERLOAD_WARNING_PERCENT_DEFAULT);
+    appConfig.loadPowerThreshold     = prefs.getFloat("loadPwr",  LOAD_MIN_POWER);
+    appConfig.loadCurrentThreshold   = prefs.getFloat("loadCur",  LOAD_MIN_CURRENT);
+    appConfig.loadRemovedDelaySec    = prefs.getULong("loadRmSec", LOAD_REMOVED_DEBOUNCE_MS / 1000UL);
+    appConfig.offlineTimeoutSec      = prefs.getULong("offSec",    OFFLINE_TIMEOUT_SEC_DEFAULT);
+    appConfig.checkpointIntervalSec  = prefs.getULong("chkSec",    CHECKPOINT_INTERVAL_SEC_DEFAULT);
     prefs.getString("uid",       currentUid,       sizeof(currentUid));
     prefs.getString("sessionId", currentSessionId, sizeof(currentSessionId));
     prefs.end();
 
+    if (strlen(appConfig.currency) == 0) {
+        strlcpy(appConfig.currency, CURRENCY_DEFAULT, sizeof(appConfig.currency));
+    }
     if (!validOverloadThreshold(appConfig.overloadThreshold)) {
         appConfig.overloadThreshold = THRESHOLD_DEFAULT;
     }
     if (!validElectricityCost(appConfig.electricityCostPerKwh)) {
         appConfig.electricityCostPerKwh = TARIF_DEFAULT;
+    }
+    if (!validPercent(appConfig.overloadWarningPercent)) {
+        appConfig.overloadWarningPercent = OVERLOAD_WARNING_PERCENT_DEFAULT;
+    }
+    if (!validPositiveFloat(appConfig.loadPowerThreshold)) {
+        appConfig.loadPowerThreshold = LOAD_MIN_POWER;
+    }
+    if (!validPositiveFloat(appConfig.loadCurrentThreshold)) {
+        appConfig.loadCurrentThreshold = LOAD_MIN_CURRENT;
+    }
+    if (!validPositiveSeconds(appConfig.loadRemovedDelaySec)) {
+        appConfig.loadRemovedDelaySec = LOAD_REMOVED_DEBOUNCE_MS / 1000UL;
+    }
+    if (!validPositiveSeconds(appConfig.offlineTimeoutSec)) {
+        appConfig.offlineTimeoutSec = OFFLINE_TIMEOUT_SEC_DEFAULT;
+    }
+    if (!validPositiveSeconds(appConfig.checkpointIntervalSec)) {
+        appConfig.checkpointIntervalSec = CHECKPOINT_INTERVAL_SEC_DEFAULT;
     }
 }
 
@@ -114,6 +154,13 @@ void savePrefs() {
     prefs.begin("sem", false);
     prefs.putFloat("threshold", appConfig.overloadThreshold);
     prefs.putFloat("tarif",     appConfig.electricityCostPerKwh);
+    prefs.putString("currency", appConfig.currency);
+    prefs.putFloat("warnPct",   appConfig.overloadWarningPercent);
+    prefs.putFloat("loadPwr",   appConfig.loadPowerThreshold);
+    prefs.putFloat("loadCur",   appConfig.loadCurrentThreshold);
+    prefs.putULong("loadRmSec", appConfig.loadRemovedDelaySec);
+    prefs.putULong("offSec",    appConfig.offlineTimeoutSec);
+    prefs.putULong("chkSec",    appConfig.checkpointIntervalSec);
     prefs.end();
 }
 
@@ -140,16 +187,33 @@ bool setElectricityCostPerKwh(float costPerKwh, const char* source) {
 bool setAppConfig(const AppConfig& next, const char* source) {
     if (!validOverloadThreshold(next.overloadThreshold)) return false;
     if (!validElectricityCost(next.electricityCostPerKwh)) return false;
+    if (strlen(next.currency) == 0) return false;
+    if (!validPercent(next.overloadWarningPercent)) return false;
+    if (!validPositiveFloat(next.loadPowerThreshold)) return false;
+    if (!validPositiveFloat(next.loadCurrentThreshold)) return false;
+    if (!validPositiveSeconds(next.loadRemovedDelaySec)) return false;
+    if (!validPositiveSeconds(next.offlineTimeoutSec)) return false;
+    if (!validPositiveSeconds(next.checkpointIntervalSec)) return false;
 
     bool changed = next.overloadThreshold != appConfig.overloadThreshold ||
-                   next.electricityCostPerKwh != appConfig.electricityCostPerKwh;
+                   next.electricityCostPerKwh != appConfig.electricityCostPerKwh ||
+                   strcmp(next.currency, appConfig.currency) != 0 ||
+                   next.overloadWarningPercent != appConfig.overloadWarningPercent ||
+                   next.loadPowerThreshold != appConfig.loadPowerThreshold ||
+                   next.loadCurrentThreshold != appConfig.loadCurrentThreshold ||
+                   next.loadRemovedDelaySec != appConfig.loadRemovedDelaySec ||
+                   next.offlineTimeoutSec != appConfig.offlineTimeoutSec ||
+                   next.checkpointIntervalSec != appConfig.checkpointIntervalSec;
     if (!changed) return true;
 
     appConfig = next;
     savePrefs();
-    Serial.printf("[Prefs] Config threshold=%.0fW cost=%.2f/kWh (%s)\n",
+    Serial.printf("[Prefs] Config threshold=%.0fW cost=%.2f/kWh currency=%s load=%.2fA/%.1fW (%s)\n",
                   appConfig.overloadThreshold,
                   appConfig.electricityCostPerKwh,
+                  appConfig.currency,
+                  appConfig.loadCurrentThreshold,
+                  appConfig.loadPowerThreshold,
                   source && strlen(source) > 0 ? source : "update");
     return true;
 }

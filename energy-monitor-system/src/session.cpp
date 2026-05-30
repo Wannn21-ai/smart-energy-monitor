@@ -150,7 +150,8 @@ void handleLoadCheck(float current, float power) {
         return;
     }
 
-    bool loadDetected = current >= LOAD_MIN_CURRENT && power >= LOAD_MIN_POWER;
+    bool loadDetected = current >= appConfig.loadCurrentThreshold &&
+                        power >= appConfig.loadPowerThreshold;
     if (loadDetected) {
         loadDetectStableCount++;
     } else {
@@ -508,7 +509,8 @@ void handleLoadRemovedDuringMonitoring(float current, float power) {
         return;
     }
 
-    bool loadPresent = current >= LOAD_MIN_CURRENT && power >= LOAD_MIN_POWER;
+    bool loadPresent = current >= appConfig.loadCurrentThreshold &&
+                       power >= appConfig.loadPowerThreshold;
     if (loadPresent) {
         loadRemovedSinceMs = 0;
         disconnectCount = 0;
@@ -531,7 +533,7 @@ void handleLoadRemovedDuringMonitoring(float current, float power) {
     Serial.printf("[Disconnect] Load missing for %lums I=%.2fA P=%.1fW\n",
                   missingMs, current, power);
 
-    if (missingMs < LOAD_REMOVED_DEBOUNCE_MS) return;
+    if (missingMs < appConfig.loadRemovedDelaySec * 1000UL) return;
 
     Serial.println("[Disconnect] Load removed - finalizing session locally");
 
@@ -559,9 +561,8 @@ void handleDeviceDisconnect() {
 void handleOverload(float power) {
     bool canEvaluate = relayOn && sessionActive && deviceConnected && !overloadAlertLinger;
     float threshold = appConfig.overloadThreshold;
-    float warningAt = threshold > OVERLOAD_WARNING_MARGIN_W
-        ? threshold - OVERLOAD_WARNING_MARGIN_W
-        : threshold;
+    float warningAt = threshold * (appConfig.overloadWarningPercent / 100.0f);
+    if (warningAt > threshold) warningAt = threshold;
 
     bool warning = canEvaluate && power >= warningAt && power < threshold;
     if (warning != overloadWarning) {

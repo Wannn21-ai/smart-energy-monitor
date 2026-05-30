@@ -1,7 +1,6 @@
-import { db, ref, get, set, update } from "./firebase-config.js";
+import { db, ref, get, set, update, DEVICE_ID } from "./firebase-config.js";
 
 const LOCAL_FETCH_TIMEOUT_MS = 1500;
-const DEFAULT_DEVICE_ID = "esp32-smart-energy-001";
 
 function toTimestampMs(value) {
   const n = Number(value || 0);
@@ -77,7 +76,7 @@ function normalizeLocalHistory(entries) {
 
 async function getEspHistoryUrl(uid) {
   try {
-    const snap = await get(ref(db, "live/system"));
+    const snap = await get(ref(db, `devices/${DEVICE_ID}/live/system`));
     const sys = snap.exists() ? snap.val() : {};
     const ip = sys.ip || sys.localIp || "";
     if (ip) {
@@ -92,7 +91,7 @@ async function getEspHistoryUrl(uid) {
 
 async function getDeviceId(uid) {
   try {
-    const snap = await get(ref(db, "live/system"));
+    const snap = await get(ref(db, `devices/${DEVICE_ID}/live/system`));
     const sys = snap.exists() ? snap.val() : {};
     const deviceId = sys.deviceId || sys.deviceID || "";
     if (deviceId) {
@@ -101,7 +100,7 @@ async function getDeviceId(uid) {
     }
   } catch {}
 
-  return localStorage.getItem(`sem_device_id_${uid}`) || DEFAULT_DEVICE_ID;
+  return localStorage.getItem(`sem_device_id_${uid}`) || DEVICE_ID;
 }
 
 function normalizeCompletedSession(session, sessionId, deviceId) {

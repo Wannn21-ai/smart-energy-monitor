@@ -3,7 +3,7 @@ import {
   startStatusWatcher, applyTheme, applyLanguage,
   loadAndApplySettings
 } from "./auth-guard.js";
-import { auth, db, ref, set, get, update } from "./firebase-config.js";
+import { auth, db, ref, set, get, update, DEVICE_ID } from "./firebase-config.js";
 import { updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const user = await requireAuth();
@@ -23,6 +23,12 @@ const HISTORY_PATH  = `users/${uid}/history`;
 const DEFAULTS = {
   currency: "IDR", tariff: 1444.70,
   overloadThreshold: 2000,
+  overloadWarningPercent: 99,
+  loadPowerThreshold: 1,
+  loadCurrentThreshold: 0.02,
+  loadRemovedDelaySec: 2,
+  offlineTimeoutSec: 300,
+  checkpointIntervalSec: 30,
   theme: "dark", language: "en",
   notifDevice: true, notifDisconnect: true,
   notifSession: true, notifOverload: true,
@@ -116,7 +122,7 @@ async function saveSettingsToFirebase(partial) {
 
 async function syncSharedConfigToSettings() {
   try {
-    const snap = await get(ref(db, "config/app"));
+    const snap = await get(ref(db, `devices/${DEVICE_ID}/config`));
     if (!snap.exists()) return;
     const shared = snap.val() || {};
     const sharedThreshold = Number(shared.overloadThreshold ?? shared.threshold);
@@ -124,6 +130,12 @@ async function syncSharedConfigToSettings() {
     const next = { ...settings };
     if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) next.overloadThreshold = sharedThreshold;
     if (Number.isFinite(sharedTariff) && sharedTariff > 0) next.tariff = sharedTariff;
+    if (shared.currency) next.currency = shared.currency;
+    ["overloadWarningPercent", "loadPowerThreshold", "loadCurrentThreshold",
+     "loadRemovedDelaySec", "offlineTimeoutSec", "checkpointIntervalSec"].forEach(key => {
+      const value = Number(shared[key]);
+      if (Number.isFinite(value) && value > 0) next[key] = value;
+    });
     if (JSON.stringify(next) === JSON.stringify(settings)) return;
 
     settings = next;
@@ -185,15 +197,20 @@ document.getElementById("btn-save-settings").addEventListener("click", async () 
   try {
     await saveSettingsToFirebase({ currency, tariff, overloadThreshold: threshold });
     try {
-      await set(ref(db, "config/app"), {
+      await update(ref(db, `devices/${DEVICE_ID}/config`), {
+        tariff,
+        currency,
         overloadThreshold: threshold,
-        electricityCostPerKwh: tariff,
-        tariff
+        overloadWarningPercent: settings.overloadWarningPercent,
+        loadPowerThreshold: settings.loadPowerThreshold,
+        loadCurrentThreshold: settings.loadCurrentThreshold,
+        loadRemovedDelaySec: settings.loadRemovedDelaySec,
+        offlineTimeoutSec: settings.offlineTimeoutSec,
+        checkpointIntervalSec: settings.checkpointIntervalSec
       });
-      await set(ref(db, "config/threshold"), threshold);
       await update(ref(db, SETTINGS_PATH), { overloadThreshold: threshold, tariff });
     } catch (e) {
-      console.warn("[SEM] Gagal sync config ke /config:", e);
+      console.warn("[SEM] Gagal sync config device:", e);
     }
     showToast("Pengaturan tersimpan ✓", "success");
   } catch (e) {

@@ -1,4 +1,4 @@
-import { auth, db, ref, onValue, get } from "./firebase-config.js";
+import { auth, db, ref, onValue, get, DEVICE_ID } from "./firebase-config.js";
 import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 // ── Auth guard ────────────────────────────────────
@@ -319,6 +319,12 @@ export function renderShell(activePage, pageTitle) {
 export async function loadAndApplySettings(uid) {
   const DEFAULTS = {
     currency: "IDR", tariff: 1444.70, overloadThreshold: 2000,
+    overloadWarningPercent: 99,
+    loadPowerThreshold: 1,
+    loadCurrentThreshold: 0.02,
+    loadRemovedDelaySec: 2,
+    offlineTimeoutSec: 300,
+    checkpointIntervalSec: 30,
     theme: "dark", language: "en",
     notifDevice: true, notifDisconnect: true, notifSession: true,
     notifOverload: true, refreshInterval: 3000
@@ -352,7 +358,7 @@ export async function loadAndApplySettings(uid) {
   }
 
   try {
-    const appSnap = await get(ref(db, "config/app"));
+    const appSnap = await get(ref(db, `devices/${DEVICE_ID}/config`));
     if (appSnap.exists()) {
       const shared = appSnap.val() || {};
       const sharedThreshold = Number(shared.overloadThreshold ?? shared.threshold);
@@ -360,19 +366,15 @@ export async function loadAndApplySettings(uid) {
       const next = { ...settings };
       if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) next.overloadThreshold = sharedThreshold;
       if (Number.isFinite(sharedTariff) && sharedTariff > 0) next.tariff = sharedTariff;
+      if (shared.currency) next.currency = shared.currency;
+      ["overloadWarningPercent", "loadPowerThreshold", "loadCurrentThreshold",
+       "loadRemovedDelaySec", "offlineTimeoutSec", "checkpointIntervalSec"].forEach(key => {
+        const value = Number(shared[key]);
+        if (Number.isFinite(value) && value > 0) next[key] = value;
+      });
       if (JSON.stringify(next) !== JSON.stringify(settings)) {
         settings = next;
         localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
-      }
-    } else {
-      const thresholdSnap = await get(ref(db, "config/threshold"));
-      if (thresholdSnap.exists()) {
-        const sharedThreshold = Number(thresholdSnap.val());
-        if (Number.isFinite(sharedThreshold) && sharedThreshold > 0 &&
-            sharedThreshold !== settings.overloadThreshold) {
-          settings = { ...settings, overloadThreshold: sharedThreshold };
-          localStorage.setItem(`sem_settings_${uid}`, JSON.stringify(settings));
-        }
       }
     }
   } catch (e) {
@@ -405,7 +407,7 @@ export function setSystemStatus(online) {
 
 // ── Firebase status watcher ───────────────────────
 export function startStatusWatcher() {
-  onValue(ref(db, "live/system"), snapshot => {
+  onValue(ref(db, `devices/${DEVICE_ID}/live/system`), snapshot => {
     const sys  = snapshot.val() || {};
     const now  = Math.floor(Date.now() / 1000);
     const diff = now - (sys.timestamp || 0);

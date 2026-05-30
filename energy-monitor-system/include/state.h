@@ -54,6 +54,13 @@ struct SessionData {
 struct AppConfig {
     float overloadThreshold;
     float electricityCostPerKwh;
+    char currency[8];
+    float overloadWarningPercent;
+    float loadPowerThreshold;
+    float loadCurrentThreshold;
+    unsigned long loadRemovedDelaySec;
+    unsigned long offlineTimeoutSec;
+    unsigned long checkpointIntervalSec;
 };
 
 extern AppConfig appConfig;

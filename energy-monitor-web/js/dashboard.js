@@ -3,7 +3,7 @@ import {
   showToast, applyTheme, updateChartColors, startStatusWatcher,
   loadAndApplySettings
 } from "./auth-guard.js";
-import { db, ref, onValue, set, push, get } from "./firebase-config.js";
+import { db, ref, onValue, set, push, get, DEVICE_ID } from "./firebase-config.js";
 import { loadDeviceHistory } from "./local-history.js";
 
 // ================= INIT =================
@@ -22,6 +22,12 @@ const commandRef  = ref(db, "command/relay");
 // ================= SETTINGS =================
 const SETTING_DEFAULTS = {
   currency: "IDR", tariff: 1444.70, overloadThreshold: 2000,
+  overloadWarningPercent: 99,
+  loadPowerThreshold: 1,
+  loadCurrentThreshold: 0.02,
+  loadRemovedDelaySec: 2,
+  offlineTimeoutSec: 300,
+  checkpointIntervalSec: 30,
   notifDevice: true, notifDisconnect: true, notifSession: true,
   notifOverload: true, refreshInterval: 3000, theme: "dark", language: "en"
 };
@@ -33,21 +39,19 @@ setInterval(async () => {
   try {
     const snap = await get(settingsRef);
     const remote = snap.exists() ? { ...SETTING_DEFAULTS, ...snap.val() } : { ...settings };
-    const appConfigSnap = await get(ref(db, "config/app"));
+    const appConfigSnap = await get(ref(db, `devices/${DEVICE_ID}/config`));
     if (appConfigSnap.exists()) {
       const shared = appConfigSnap.val() || {};
       const sharedThreshold = Number(shared.overloadThreshold ?? shared.threshold);
       const sharedTariff = Number(shared.electricityCostPerKwh ?? shared.tariff ?? shared.tarif);
       if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) remote.overloadThreshold = sharedThreshold;
       if (Number.isFinite(sharedTariff) && sharedTariff > 0) remote.tariff = sharedTariff;
-    } else {
-      const thresholdSnap = await get(ref(db, "config/threshold"));
-      if (thresholdSnap.exists()) {
-        const sharedThreshold = Number(thresholdSnap.val());
-        if (Number.isFinite(sharedThreshold) && sharedThreshold > 0) {
-          remote.overloadThreshold = sharedThreshold;
-        }
-      }
+      if (shared.currency) remote.currency = shared.currency;
+      ["overloadWarningPercent", "loadPowerThreshold", "loadCurrentThreshold",
+       "loadRemovedDelaySec", "offlineTimeoutSec", "checkpointIntervalSec"].forEach(key => {
+        const value = Number(shared[key]);
+        if (Number.isFinite(value) && value > 0) remote[key] = value;
+      });
     }
     if (JSON.stringify(remote) !== JSON.stringify(settings)) {
       settings = remote;
@@ -60,8 +64,6 @@ setInterval(async () => {
 
 // ================= CONSTANTS =================
 const STALE_THRESHOLD = 15;
-const LOAD_MIN_CURRENT = 0.02;
-const LOAD_MIN_POWER = 1.0;
 const SystemMode = Object.freeze({
   ONLINE: "ONLINE",
   OFFLINE: "OFFLINE",
@@ -825,7 +827,7 @@ if (btnStop) {
 }
 
 // ================= FIREBASE LIVE LISTENER =================
-onValue(ref(db, "live"), snapshot => {
+onValue(ref(db, `devices/${DEVICE_ID}/live`), snapshot => {
   const data = snapshot.val();
   if (!data) return;
 
@@ -857,7 +859,9 @@ onValue(ref(db, "live"), snapshot => {
   updateTimer();
 
   if (firebaseSessionState !== SessionState.WAITING_LOAD &&
-      current >= LOAD_MIN_CURRENT && firebasePower >= LOAD_MIN_POWER && firebaseEnergy > 0) {
+      current >= settings.loadCurrentThreshold &&
+      firebasePower >= settings.loadPowerThreshold &&
+      firebaseEnergy > 0) {
     lastknownEnergy = firebaseEnergy;
   }
 });
@@ -877,8 +881,8 @@ async function updateMeters() {
   systemOnline = systemInternet && dataFresh;
   deviceOnline = systemOnline &&
     firebaseSessionState !== SessionState.WAITING_LOAD &&
-    current >= LOAD_MIN_CURRENT &&
-    firebasePower >= LOAD_MIN_POWER;
+    current >= settings.loadCurrentThreshold &&
+    firebasePower >= settings.loadPowerThreshold;
 
   const webOverload = deviceOnline && firebasePower >= settings.overloadThreshold;
   systemMode = deriveSystemMode();

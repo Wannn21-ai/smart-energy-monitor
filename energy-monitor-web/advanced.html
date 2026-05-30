@@ -519,7 +519,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script type="module">
 import { requireAuth, renderShell, fillUserInfo, startStatusWatcher, applyTheme } from "./js/auth-guard.js";
-import { db, ref, onValue } from "./js/firebase-config.js";
+import { db, ref, onValue, DEVICE_ID } from "./js/firebase-config.js";
 
 const user = await requireAuth();
 renderShell("advanced", "ADVANCED");
@@ -657,7 +657,7 @@ function renderLog() {
 
 // ── Firebase listener ──
 let lastTimestamp = 0;
-onValue(ref(db, "live"), snapshot => {
+onValue(ref(db, `devices/${DEVICE_ID}/live`), snapshot => {
   const data = snapshot.val();
   if (!data) return;
 

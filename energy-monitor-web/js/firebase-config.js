@@ -35,6 +35,7 @@ const firebaseConfig = {
 const app  = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db   = getDatabase(app);
+const DEVICE_ID = "esp32-smart-energy-001";
 
 // Export semua — termasuk `update` secara eksplisit
-export { auth, db, ref, onValue, set, push, remove, get, update };
+export { auth, db, ref, onValue, set, push, remove, get, update, DEVICE_ID };

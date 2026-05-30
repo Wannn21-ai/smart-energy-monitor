@@ -56,34 +56,19 @@ static void syncPortalSettingsToFirebase() {
     WiFiClientSecure c; c.setInsecure(); c.setTimeout(5000);
     HTTPClient h;
 
-    if (h.begin(c, String(FIREBASE_HOST) + "/config/threshold.json")) {
+    if (h.begin(c, String(FIREBASE_HOST) + String(FIREBASE_CONFIG_PATH))) {
         h.addHeader("Content-Type", "application/json");
-        h.PUT(String(appConfig.overloadThreshold, 0));
+        String body = "{\"tariff\":" + String(appConfig.electricityCostPerKwh, 2) +
+                      ",\"currency\":\"" + String(appConfig.currency) + "\"" +
+                      ",\"overloadThreshold\":" + String(appConfig.overloadThreshold, 0) +
+                      ",\"overloadWarningPercent\":" + String(appConfig.overloadWarningPercent, 1) +
+                      ",\"loadPowerThreshold\":" + String(appConfig.loadPowerThreshold, 2) +
+                      ",\"loadCurrentThreshold\":" + String(appConfig.loadCurrentThreshold, 3) +
+                      ",\"loadRemovedDelaySec\":" + String(appConfig.loadRemovedDelaySec) +
+                      ",\"offlineTimeoutSec\":" + String(appConfig.offlineTimeoutSec) +
+                      ",\"checkpointIntervalSec\":" + String(appConfig.checkpointIntervalSec) + "}";
+        h.PATCH(body);
         h.end();
-    }
-
-    WiFiClientSecure cCfg; cCfg.setInsecure(); cCfg.setTimeout(5000);
-    HTTPClient hCfg;
-    if (hCfg.begin(cCfg, String(FIREBASE_HOST) + "/config/app.json")) {
-        hCfg.addHeader("Content-Type", "application/json");
-        String body = "{\"overloadThreshold\":" + String(appConfig.overloadThreshold, 0) +
-                      ",\"electricityCostPerKwh\":" + String(appConfig.electricityCostPerKwh, 2) +
-                      ",\"tariff\":" + String(appConfig.electricityCostPerKwh, 2) + "}";
-        hCfg.PUT(body);
-        hCfg.end();
-    }
-
-    if (strlen(currentUid) == 0) return;
-
-    WiFiClientSecure c2; c2.setInsecure(); c2.setTimeout(5000);
-    HTTPClient h2;
-    String path = String("/users/") + currentUid + "/settings.json";
-    if (h2.begin(c2, String(FIREBASE_HOST) + path)) {
-        h2.addHeader("Content-Type", "application/json");
-        String body = "{\"overloadThreshold\":" + String(appConfig.overloadThreshold, 0) +
-                      ",\"tariff\":" + String(appConfig.electricityCostPerKwh, 2) + "}";
-        h2.PATCH(body);
-        h2.end();
     }
 }
 
