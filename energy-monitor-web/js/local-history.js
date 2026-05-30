@@ -1,4 +1,4 @@
-import { db, ref, get, set, update, DEVICE_ID } from "./firebase-config.js";
+import { auth, db, ref, get, set, DEVICE_ID } from "./firebase-config.js";
 
 const LOCAL_FETCH_TIMEOUT_MS = 1500;
 
@@ -103,8 +103,9 @@ async function getDeviceId(uid) {
   return localStorage.getItem(`sem_device_id_${uid}`) || DEVICE_ID;
 }
 
-function normalizeCompletedSession(session, sessionId, deviceId) {
+function normalizeCompletedSession(session, sessionId, deviceId, uid) {
   const timestamp = Number(session.timestamp || session.endTime || Date.now());
+  const sourcePath = `/devices/${deviceId}/completedSessions/${sessionId}`;
   return {
     ...session,
     id: session.id || sessionId,
@@ -120,54 +121,67 @@ function normalizeCompletedSession(session, sessionId, deviceId) {
     timestamp,
     syncStatus: "SYNCED",
     pendingSync: false,
-    createdFrom: session.createdFrom || "ESP32"
+    createdFrom: session.createdFrom || "ESP32",
+    copiedAt: Date.now(),
+    ownerUid: uid,
+    sourcePath
   };
 }
 
-async function markCompletedSessionSynced(deviceId, sessionId, uid) {
-  try {
-    await update(ref(db, `devices/${deviceId}/completedSessions/${sessionId}`), {
-      syncStatus: "SYNCED",
-      pendingSync: false,
-      syncedBy: uid,
-      syncedAt: Date.now(),
-      [`copiedToUsers/${uid}`]: true
-    });
-  } catch (e) {
-    console.warn("[History] User history saved, but queue status update failed:", e?.message || e);
-  }
+const activeImports = new Map();
+
+async function countUserHistory(uid) {
+  const snap = await get(ref(db, `users/${uid}/history`));
+  return snap.exists() ? Object.keys(snap.val() || {}).length : 0;
 }
 
-async function importCompletedSessionsToUserHistory(uid) {
-  const deviceId = await getDeviceId(uid);
+async function importCompletedSessions(uid) {
+  const deviceId = DEVICE_ID;
+  console.log("[History Import] currentUser.uid", uid);
   try {
     const queueSnap = await get(ref(db, `devices/${deviceId}/completedSessions`));
-    if (!queueSnap.exists()) return 0;
+    const sessions = queueSnap.val() || {};
+    const entries = Object.entries(sessions);
+    console.log("[History Import] completedSessions count", entries.length);
 
     let copied = 0;
-    const sessions = queueSnap.val() || {};
     for (const [key, session] of Object.entries(sessions)) {
       if (!session || typeof session !== "object") continue;
-      const sessionId = session.id || session.sessionId || key;
-      if (!sessionId || session.syncStatus === "SYNCED") continue;
-      if (session.copiedToUsers?.[uid] === true) continue;
+      const sessionId = String(session.id || session.sessionId || key);
+      if (!sessionId) continue;
 
       const userHistoryRef = ref(db, `users/${uid}/history/${sessionId}`);
       const existing = await get(userHistoryRef);
       if (existing.exists()) {
-        await markCompletedSessionSynced(deviceId, key, uid);
+        console.log("[History Import] skipped duplicate session id", sessionId);
         continue;
       }
 
-      await set(userHistoryRef, normalizeCompletedSession(session, sessionId, deviceId));
-      await markCompletedSessionSynced(deviceId, key, uid);
+      await set(userHistoryRef, normalizeCompletedSession(session, sessionId, deviceId, uid));
+      console.log("[History Import] copied session id", sessionId);
       copied++;
     }
+
+    const userHistoryCount = await countUserHistory(uid);
+    console.log("[History Import] user history count after import", userHistoryCount);
     return copied;
   } catch (e) {
-    console.warn("[History] Completed-session import skipped:", e?.message || e);
+    console.error("[History Import] Firebase error:", e);
     return 0;
   }
+}
+
+export async function importCompletedSessionsForCurrentUser(user = auth.currentUser) {
+  const uid = typeof user === "string" ? user : user?.uid;
+  if (!uid) {
+    console.warn("[History Import] skipped: Firebase Auth currentUser is not available");
+    return 0;
+  }
+
+  if (activeImports.has(uid)) return activeImports.get(uid);
+  const task = importCompletedSessions(uid).finally(() => activeImports.delete(uid));
+  activeImports.set(uid, task);
+  return task;
 }
 
 async function fetchLocalHistory(uid) {
@@ -199,7 +213,7 @@ async function fetchFirebaseHistory(uid) {
 }
 
 export async function loadDeviceHistory(uid) {
-  await importCompletedSessionsToUserHistory(uid);
+  await importCompletedSessionsForCurrentUser(uid);
 
   const [local, firebase] = await Promise.all([
     fetchLocalHistory(uid),

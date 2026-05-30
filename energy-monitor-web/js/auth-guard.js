@@ -1,12 +1,16 @@
 import { auth, db, ref, onValue, get, DEVICE_ID } from "./firebase-config.js";
 import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { importCompletedSessionsForCurrentUser } from "./local-history.js";
 
 // ── Auth guard ────────────────────────────────────
 export function requireAuth() {
   return new Promise((resolve, reject) => {
     const unsub = onAuthStateChanged(auth, user => {
       unsub();
-      if (user) { resolve(user); }
+      if (user) {
+        importCompletedSessionsForCurrentUser(user);
+        resolve(user);
+      }
       else { window.location.href = "login.html"; reject("not-authenticated"); }
     });
   });
