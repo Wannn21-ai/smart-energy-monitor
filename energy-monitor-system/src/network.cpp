@@ -36,6 +36,21 @@ static String htmlEscape(const String& value) {
     return out;
 }
 
+static String jsonEscape(const String& value) {
+    String out;
+    out.reserve(value.length() + 8);
+    for (size_t i = 0; i < value.length(); i++) {
+        char c = value[i];
+        if (c == '\\') out += F("\\\\");
+        else if (c == '"') out += F("\\\"");
+        else if (c == '\n') out += F("\\n");
+        else if (c == '\r') out += F("\\r");
+        else if (c == '\t') out += F("\\t");
+        else out += c;
+    }
+    return out;
+}
+
 static void beginWifiScan() {
     if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) return;
     WiFi.scanDelete();
@@ -146,22 +161,18 @@ static void handleRoot() {
     int n = WiFi.scanComplete();
     String ssidOptions;
     String scanStatus;
-    bool autoRefreshScan = false;
 
     if (n == WIFI_SCAN_RUNNING) {
-        autoRefreshScan = true;
         ssidOptions = F("<option value='' selected>Scan WiFi sedang berjalan...</option>");
-        scanStatus = F("<div class='notice warn'>Scan WiFi sedang berjalan. Daftar akan diperbarui otomatis.</div>");
+        scanStatus = F("<div id='scan-status' class='notice warn'>Scan WiFi sedang berjalan. Daftar akan diperbarui otomatis.</div>");
     } else if (n < 0) {
         beginWifiScan();
-        autoRefreshScan = true;
         ssidOptions = F("<option value='' selected>Memulai scan WiFi...</option>");
-        scanStatus = F("<div class='notice warn'>Memulai scan WiFi. Tunggu beberapa detik.</div>");
+        scanStatus = F("<div id='scan-status' class='notice warn'>Memulai scan WiFi. Tunggu beberapa detik.</div>");
     } else if (n == 0) {
         beginWifiScan();
-        autoRefreshScan = true;
         ssidOptions = F("<option value='' selected>Tidak ada jaringan terdeteksi</option>");
-        scanStatus = F("<div class='notice err'>Belum ada WiFi terdeteksi. Pastikan router dekat, lalu scan ulang.</div>");
+        scanStatus = F("<div id='scan-status' class='notice err'>Belum ada WiFi terdeteksi. Pastikan router dekat, lalu scan ulang.</div>");
     } else {
         for (int i = 0; i < n; i++) {
             String ssid = WiFi.SSID(i);
@@ -182,10 +193,9 @@ static void handleRoot() {
         }
         if (ssidOptions.length() == 0) {
             beginWifiScan();
-            autoRefreshScan = true;
             ssidOptions = F("<option value='' selected>SSID tersembunyi - ketik manual</option>");
         }
-        scanStatus = "<div class='notice ok'>" + String(n) + " jaringan ditemukan.</div>";
+        scanStatus = "<div id='scan-status' class='notice ok'>" + String(n) + " jaringan ditemukan.</div>";
     }
 
     int pendingSync = fsCountOfflineHistory();
@@ -225,14 +235,14 @@ static void handleRoot() {
         "<div class='card'><div class='title'>Koneksi WiFi</div>"
         + syncInfo + scanStatus +
         "<label>Pilih Jaringan</label>"
-        "<select id='ssid' onchange=\"document.getElementById('ssid_manual').value=this.value\">"
+        "<select id='ssid'>"
         + ssidOptions +
         "</select>"
         "<label>Atau ketik SSID manual</label>"
         "<input type='text' id='ssid_manual' placeholder='Ketik nama WiFi...'/>"
         "<label>Password</label>"
         "<input type='password' id='wpass' placeholder='Password WiFi'/>"
-        "<button class='btn btn-p' onclick='connect()'>Hubungkan</button>"
+        "<button id='btn-connect' class='btn btn-p' onclick='connect()'>Hubungkan</button>"
         "<button class='btn btn-o' onclick='offlineMode()'>Lanjutkan ke Mode Offline</button>"
         "<button class='btn btn-g' onclick='rescan()'>Scan Ulang</button></div>"
         "<div class='card'><div class='title'>Pengaturan</div>"
@@ -245,29 +255,100 @@ static void handleRoot() {
         "<div id='toast'></div>"
         R"JS(<script>
 var _tt;
+var _scanTimer=null;
+var _connectPending=false;
+var LS_SSID='sem_setup_ssid_manual';
+var LS_PASS='sem_setup_password';
+var LS_TARIFF='sem_setup_tariff';
+var LS_THRESHOLD='sem_setup_threshold';
+function el(id){return document.getElementById(id);}
+function lsGet(k){try{return localStorage.getItem(k)||'';}catch(e){return '';}}
+function lsSet(k,v){try{localStorage.setItem(k,v||'');}catch(e){}}
+function lsDel(k){try{localStorage.removeItem(k);}catch(e){}}
 function toast(msg,type){var el=document.getElementById('toast');
 el.textContent=msg;el.className=type||'';el.classList.add('show');
 clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove('show');},4000);}
+function saveForm(){
+    lsSet(LS_SSID,el('ssid_manual').value);
+    lsSet(LS_PASS,el('wpass').value);
+    lsSet(LS_TARIFF,el('trf').value);
+    lsSet(LS_THRESHOLD,el('thr').value);
+}
+function restoreForm(){
+    var ssid=lsGet(LS_SSID), pass=lsGet(LS_PASS), trf=lsGet(LS_TARIFF), thr=lsGet(LS_THRESHOLD);
+    if(ssid)el('ssid_manual').value=ssid;
+    if(pass)el('wpass').value=pass;
+    if(trf)el('trf').value=trf;
+    if(thr)el('thr').value=thr;
+}
+function setScanStatus(msg,type){
+    var s=el('scan-status'); if(!s)return;
+    s.className='notice '+(type||'warn');
+    s.textContent=msg;
+}
+function updateScanList(data){
+    var select=el('ssid');
+    var old=select.value;
+    select.innerHTML='';
+    if(data.networks&&data.networks.length){
+        data.networks.forEach(function(n){
+            var opt=document.createElement('option');
+            opt.value=n.ssid;
+            opt.textContent=(n.rssi||0)+' dBm '+n.ssid+(n.secure?' [secured]':'');
+            select.appendChild(opt);
+        });
+        if(old)select.value=old;
+        setScanStatus(data.networks.length+' jaringan ditemukan.','ok');
+    }else{
+        var opt=document.createElement('option');
+        opt.value='';
+        opt.textContent=(data.status==='running')?'Scan WiFi sedang berjalan...':'Tidak ada jaringan terdeteksi - ketik manual';
+        select.appendChild(opt);
+        setScanStatus((data.status==='running')?'Scan WiFi sedang berjalan.':'Tidak ada WiFi terdeteksi. Kamu tetap bisa ketik SSID manual.',data.status==='running'?'warn':'err');
+    }
+}
+function pollScanList(){
+    clearTimeout(_scanTimer);
+    fetch('/scanlist',{cache:'no-store'})
+        .then(function(r){return r.json();})
+        .then(function(data){
+            updateScanList(data);
+            if(data.status==='running')_scanTimer=setTimeout(pollScanList,2500);
+        })
+        .catch(function(){setScanStatus('Gagal membaca daftar WiFi. Ketik SSID manual tetap bisa dipakai.','err');});
+}
 function connect(){
-    var manual=document.getElementById('ssid_manual').value.trim();
-    var selected=document.getElementById('ssid').value;
+    if(_connectPending)return;
+    saveForm();
+    var manual=el('ssid_manual').value.trim();
+    var selected=el('ssid').value;
     var ssid=manual||selected;
-    var pass=document.getElementById('wpass').value;
+    var pass=el('wpass').value;
     if(!ssid){toast('Pilih atau ketik nama jaringan WiFi','err');return;}
+    _connectPending=true;
+    var btn=el('btn-connect');
+    btn.disabled=true;btn.textContent='Menghubungkan...';
     toast('Menghubungkan ke "'+ssid+'"...','info');
     fetch('/connectwifi?ssid='+encodeURIComponent(ssid)+'&pass='+encodeURIComponent(pass))
         .then(function(r){return r.text();})
-        .then(function(t){toast(t,(t.indexOf('Berhasil')>=0)?'ok':'err');})
-        .catch(function(){toast('Timeout - coba lagi','err');});
+        .then(function(t){
+            var ok=t.indexOf('Berhasil')>=0;
+            if(ok)lsDel(LS_PASS);
+            toast(t,ok?'ok':'err');
+        })
+        .catch(function(){toast('Timeout - coba lagi','err');})
+        .finally(function(){_connectPending=false;btn.disabled=false;btn.textContent='Hubungkan';});
 }
 function rescan(){
+    saveForm();
     toast('Scanning WiFi...','info');
-    fetch('/rescan').then(function(){setTimeout(function(){location.reload();},3500);})
+    fetch('/rescan').then(function(){pollScanList();})
         .catch(function(){toast('Scan gagal dimulai','err');});
 }
 function save(){
-    var thr=parseFloat(document.getElementById('thr').value);
-    var trf=parseFloat(document.getElementById('trf').value);
+    saveForm();
+    var thr=parseFloat(el('thr').value);
+    var trf=parseFloat(el('trf').value);
     if(isNaN(thr)||thr<=0||thr>10000){toast('Threshold harus > 0 dan <= 10000 W','err');return;}
     if(isNaN(trf)||trf<=0){toast('Tarif tidak valid','err');return;}
     fetch('/save?thr='+thr+'&trf='+trf).then(function(r){return r.text();})
@@ -276,17 +357,26 @@ function save(){
 function resetWifi(){if(!confirm('Reset WiFi?'))return;
 fetch('/resetwifi').then(function(){toast('Mereset...','info');});}
 function offlineMode(){
+    saveForm();
     toast('Masuk Mode Offline...','info');
     fetch('/offline').then(function(r){return r.text();})
         .then(function(t){toast(t,'ok');setTimeout(function(){location.reload();},1500);})
         .catch(function(){toast('Gagal masuk Mode Offline','err');});
 }
 document.addEventListener('keydown',function(e){if(e.key==='Enter')connect();});
-)JS";
-
-    if (autoRefreshScan) {
-        html += "setTimeout(function(){location.reload();},3500);";
+['ssid_manual','wpass','trf','thr'].forEach(function(id){
+    el(id).addEventListener('input',saveForm);
+    el(id).addEventListener('change',saveForm);
+});
+el('ssid').addEventListener('change',function(){
+    if(this.value){
+        el('ssid_manual').value=this.value;
+        saveForm();
     }
+});
+restoreForm();
+pollScanList();
+)JS";
 
     html += "</script></body></html>";
 
@@ -403,6 +493,39 @@ static void handleHistory() {
     localServer.send(ok ? 200 : 500, "application/json", ok ? json : "[]");
 }
 
+static void handleScanList() {
+    int n = WiFi.scanComplete();
+    String status;
+    String networks = "[";
+
+    if (n == WIFI_SCAN_RUNNING) {
+        status = "running";
+    } else if (n < 0) {
+        status = (n == WIFI_SCAN_FAILED) ? "error" : "none";
+    } else {
+        status = (n == 0) ? "none" : "done";
+        bool first = true;
+        for (int i = 0; i < n; i++) {
+            String ssid = WiFi.SSID(i);
+            if (ssid.length() == 0) continue;
+            if (!first) networks += ",";
+            first = false;
+            networks += "{\"ssid\":\"";
+            networks += jsonEscape(ssid);
+            networks += "\",\"rssi\":";
+            networks += String(WiFi.RSSI(i));
+            networks += ",\"secure\":";
+            networks += (WiFi.encryptionType(i) != WIFI_AUTH_OPEN) ? "true" : "false";
+            networks += "}";
+        }
+    }
+
+    networks += "]";
+    String json = "{\"status\":\"" + status + "\",\"networks\":" + networks + "}";
+    sendCorsHeaders();
+    localServer.send(200, "application/json", json);
+}
+
 static void handleOptions() {
     sendCorsHeaders();
     localServer.send(204, "text/plain", "");
@@ -410,6 +533,7 @@ static void handleOptions() {
 
 static void handleRescan() {
     beginWifiScan();
+    sendCorsHeaders();
     localServer.send(200, "text/plain", "Scanning...");
 }
 
@@ -432,6 +556,8 @@ void setupWebServer() {
     localServer.on("/history",     HTTP_OPTIONS, handleOptions);
     localServer.on("/rescan",      HTTP_GET, handleRescan);
     localServer.on("/scan",        HTTP_GET, handleRescan);
+    localServer.on("/scanlist",    HTTP_GET, handleScanList);
+    localServer.on("/scanlist",    HTTP_OPTIONS, handleOptions);
 
     localServer.on("/hotspot-detect.html", HTTP_GET, handleCaptivePortal);
     localServer.on("/generate_204",        HTTP_GET, handleCaptivePortal);
